@@ -30,6 +30,7 @@ from . import load_flow
 from .layout import LayoutError, LayoutOptions, compute_layout
 from .render import save_xlsx, to_mermaid, to_svg
 from .validate import ValidationError, validate
+from .verify import VerifyError, verify_xlsx
 
 
 def _print_json(obj: Dict[str, Any]) -> None:
@@ -114,6 +115,28 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    flow = _load(args.flow)
+    try:
+        result = verify_xlsx(
+            args.xlsx,
+            flow,
+            out_dir=args.out_dir,
+            render_png=args.png,
+            png_dpi=args.dpi,
+            keep_pdf=not args.no_pdf,
+        )
+    except VerifyError as e:
+        return _print_error(e.kind, e.message, e.details)
+
+    payload = result.to_dict()
+    if not args.include_text:
+        # keep the stdout report compact by default
+        payload["extracted_text_len"] = len(payload.pop("extracted_text"))
+    _print_json({"ok": result.ok, "report": payload})
+    return 0 if result.ok else 2
+
+
 def _infer_format(out: Path) -> str:
     ext = out.suffix.lower()
     return {
@@ -153,6 +176,24 @@ def _build_parser() -> argparse.ArgumentParser:
     vp = sub.add_parser("validate", help="Run flow validation; print warnings JSON.")
     add_common(vp)
     vp.set_defaults(func=_cmd_validate)
+
+    vy = sub.add_parser(
+        "verify",
+        help="Convert xlsx to PDF via LibreOffice and verify labels are present.",
+    )
+    vy.add_argument("flow", help="Path to the source flow YAML (for expected labels).")
+    vy.add_argument("xlsx", help="Path to the xlsx file to verify.")
+    vy.add_argument("--out-dir", default=None,
+                    help="Directory to write the PDF/PNG into (default: xlsx's dir).")
+    vy.add_argument("--png", action="store_true",
+                    help="Also rasterise each PDF page to PNG.")
+    vy.add_argument("--dpi", type=int, default=120,
+                    help="PNG raster DPI (default: 120).")
+    vy.add_argument("--no-pdf", action="store_true",
+                    help="Delete the intermediate PDF after verification.")
+    vy.add_argument("--include-text", action="store_true",
+                    help="Include the full extracted PDF text in the JSON report.")
+    vy.set_defaults(func=_cmd_verify)
 
     return p
 

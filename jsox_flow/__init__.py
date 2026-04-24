@@ -7,10 +7,12 @@ from .layout import (
     LayoutResult,
     compute_layout,
 )
+from .verify import VerifyError, VerifyResult, verify_xlsx
 
 __all__ = [
     "Flow", "Lane", "Node", "Edge", "NodeType",
     "validate", "ValidationError",
     "load_flow", "dump_flow", "to_yaml", "from_yaml",
     "compute_layout", "LayoutOptions", "LayoutResult", "LayoutError",
+    "verify_xlsx", "VerifyResult", "VerifyError",
 ]

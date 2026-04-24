@@ -14,3 +14,8 @@ venv/
 
 # Node dependencies for the layout engine (installed via npm ci / Dockerfile)
 jsox_flow/layout/node_modules/
+
+# Verification artifacts (regenerated on demand by examples/verify_all.py)
+examples/*.pdf
+examples/*-[0-9].png
+examples/*-[0-9][0-9].png
