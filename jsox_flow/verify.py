@@ -269,6 +269,13 @@ def _count_pages_fallback(pdf: Path) -> int:
 
 def _rasterise(pdf: Path, out_dir: Path, dpi: int, *, timeout: int) -> List[str]:
     exe = _find_tool("JSOX_PDFTOPPM", ["pdftoppm"])
+    # Clean stale PNGs from previous runs so the result exactly matches
+    # the current PDF's page count.
+    for stale in out_dir.glob(f"{pdf.stem}-*.png"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     prefix = out_dir / pdf.stem
     proc = subprocess.run(
         [exe, "-r", str(dpi), "-png", str(pdf), str(prefix)],

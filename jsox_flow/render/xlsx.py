@@ -61,21 +61,25 @@ SHEET_NOTES = "注記"
 TITLE_ROW = 1
 WARNING_ROW = 2
 
-# Horizontal: lane-header in col A, one cell per rank from col B.
-H_FIRST_LANE_ROW = 3
+# Horizontal: lane-header in col A, step cells from col B. Row 3 is a
+# back-edge channel so U-shaped connectors have clean space to route.
+H_BACK_CHANNEL_ROW = 3
+H_FIRST_LANE_ROW = 4
 H_LANE_HEADER_COL = 1
 H_FIRST_STEP_COL = 2
 
-# Vertical: lane-header in row 3, one cell per rank from row 4.
+# Vertical: lane-header in row 3, step cells from row 4. Col A is the
+# back-edge channel so U-shaped connectors have clean space to route.
 V_LANE_HEADER_ROW = 3
-V_FIRST_LANE_COL = 1
+V_FIRST_LANE_COL = 2
 V_FIRST_STEP_ROW = 4
 
 ROW_TITLE_HEIGHT_PT = 28
 ROW_WARNING_HEIGHT_PT = 32
+ROW_BACK_CHANNEL_HEIGHT_PT = 32
+COL_BACK_CHANNEL_WIDTH_CHARS = 12
 
 H_HEADER_WIDTH_CHARS = 14
-V_LEFT_CHANNEL_WIDTH_CHARS = 12  # unused cell for aesthetics in vertical
 
 
 # --- styling ----------------------------------------------------------------
@@ -132,11 +136,19 @@ class _Grid:
     def body_origin_emu(self) -> Tuple[int, int]:
         """(x, y) EMU offset from top-left of sheet to top-left of body."""
         if self.vertical:
-            # body starts at col B (index 1 edge) and row 4 (index 3 edge)
             return (self.col_edges_emu[V_FIRST_LANE_COL - 1],
                     self.row_edges_emu[V_FIRST_STEP_ROW - 1])
         return (self.col_edges_emu[H_FIRST_STEP_COL - 1],
                 self.row_edges_emu[H_FIRST_LANE_ROW - 1])
+
+    def back_channel_center_emu(self) -> int:
+        """Center of the back-edge channel on the perpendicular axis."""
+        if self.vertical:
+            # col A is the back-edge channel
+            return (self.col_edges_emu[0] + self.col_edges_emu[1]) // 2
+        # row 3 is the back-edge channel
+        return (self.row_edges_emu[H_BACK_CHANNEL_ROW - 1]
+                + self.row_edges_emu[H_BACK_CHANNEL_ROW]) // 2
 
     def last_col(self) -> int:
         if self.vertical:
@@ -221,7 +233,7 @@ def _make_grid(flow: Flow, layout: LayoutResult) -> _Grid:
     step_height_pt = step_size_px / PX_PER_PT
 
     if vertical:
-        col_widths_chars = [0.0, V_LEFT_CHANNEL_WIDTH_CHARS]
+        col_widths_chars = [0.0, COL_BACK_CHANNEL_WIDTH_CHARS]
         col_widths_chars.extend([lane_width_chars] * n_lanes)
         row_heights_pt = [
             0.0,
@@ -237,6 +249,7 @@ def _make_grid(flow: Flow, layout: LayoutResult) -> _Grid:
             0.0,
             ROW_TITLE_HEIGHT_PT,
             ROW_WARNING_HEIGHT_PT,
+            ROW_BACK_CHANNEL_HEIGHT_PT,
         ]
         row_heights_pt.extend([lane_height_pt] * n_lanes)
 
@@ -319,9 +332,37 @@ def _build_flow_sheet(
     _write_title(ws, last_col)
     _write_warning(ws, last_col, layout.warnings)
     _write_lane_bands(ws, flow, layout, grid, last_row, last_col)
+    _configure_printing(ws, grid, last_row, last_col)
 
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "B4"
+
+
+def _configure_printing(
+    ws, grid: _Grid, last_row: int, last_col: int,
+) -> None:
+    """Set up print area so the PDF / printout is readable.
+
+    Horizontal flowcharts easily exceed A4 landscape; forcing them onto
+    a single page makes text microscopic. We use A3 landscape for those
+    (which fits most J-SOX flows at a readable size) and only then turn
+    on fit-to-width.
+    """
+    if grid.vertical:
+        ws.page_setup.orientation = "portrait"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    else:
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A3
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0  # 0 = unlimited height in pages
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.4
+    ws.page_margins.bottom = 0.4
+    last_letter = get_column_letter(last_col)
+    ws.print_area = f"A1:{last_letter}{last_row}"
 
 
 def _write_title(ws, last_col: int) -> None:
@@ -468,26 +509,46 @@ def _build_drawing_xml(
         w_emu = src_nl.width * EMU_PER_PX
         h_emu = src_nl.height * EMU_PER_PX
 
-        # Let Excel auto-route: bentConnector3 wired via stCxn/endCxn.
-        # Bounding box is just a routing hint; Excel re-computes on save.
-        bx = min(src_cx, dst_cx) - w_emu // 2
-        by = min(src_cy, dst_cy) - h_emu // 2
-        bw = max(abs(dst_cx - src_cx), 1)
-        bh = max(abs(dst_cy - src_cy), 1)
+        src_site, dst_site = _pick_connector_sites(grid.vertical, e.is_back)
+
+        # Bounding box is a routing hint. For back edges, extend it
+        # toward the back-channel axis so bentConnector3 has perpendicular
+        # room to draw the U-detour rather than collapsing to a straight
+        # overlay.
+        if e.is_back and grid.vertical:
+            channel = grid.back_channel_center_emu()
+            bx = min(src_cx, dst_cx, channel) - w_emu // 2
+            by = min(src_cy, dst_cy) - h_emu // 2
+            bw = max(max(src_cx, dst_cx) - bx, 1)
+            bh = max(abs(dst_cy - src_cy), 1)
+        elif e.is_back:
+            channel = grid.back_channel_center_emu()
+            bx = min(src_cx, dst_cx) - w_emu // 2
+            by = min(src_cy, dst_cy, channel) - h_emu // 2
+            bw = max(abs(dst_cx - src_cx), 1)
+            bh = max(max(src_cy, dst_cy) - by, 1)
+        else:
+            bx = min(src_cx, dst_cx) - w_emu // 2
+            by = min(src_cy, dst_cy) - h_emu // 2
+            bw = max(abs(dst_cx - src_cx), 1)
+            bh = max(abs(dst_cy - src_cy), 1)
         flip_h = src_cx > dst_cx
         flip_v = src_cy > dst_cy
 
         parts.append(_bent_connector_xml(
             next_id,
-            node_shape_id[e.from_id], SITE_RIGHT if not grid.vertical else SITE_BOTTOM,
-            node_shape_id[e.to_id],   SITE_LEFT  if not grid.vertical else SITE_TOP,
+            node_shape_id[e.from_id], src_site,
+            node_shape_id[e.to_id],   dst_site,
             bx, by, bw, bh, flip_h, flip_v, grid,
         ))
         next_id += 1
 
         if e.condition:
-            lx = (src_cx + dst_cx) // 2 - label_w_emu // 2
-            ly = (src_cy + dst_cy) // 2 - label_h_emu // 2
+            lx, ly = _label_anchor_emu(
+                src_cx, src_cy, dst_cx, dst_cy, w_emu, h_emu,
+                label_w_emu, label_h_emu,
+                is_back=e.is_back, vertical=grid.vertical,
+            )
             parts.append(_label_xml(
                 next_id, lx, ly, label_w_emu, label_h_emu, e.condition, grid,
             ))
@@ -495,6 +556,68 @@ def _build_drawing_xml(
 
     parts.append("</xdr:wsDr>")
     return "\n".join(parts)
+
+
+def _pick_connector_sites(vertical: bool, is_back: bool) -> Tuple[int, int]:
+    """Pick which shape edges the connector attaches to.
+
+    For forward edges the endpoints are on the facing sides (so the
+    connector becomes an L); for back edges we use same-side endpoints
+    so Excel naturally draws a U-shape that detours around the source.
+    """
+    if vertical:
+        if is_back:
+            return SITE_LEFT, SITE_LEFT
+        return SITE_BOTTOM, SITE_TOP
+    if is_back:
+        return SITE_TOP, SITE_TOP
+    return SITE_RIGHT, SITE_LEFT
+
+
+def _label_anchor_emu(
+    src_cx: int, src_cy: int,
+    dst_cx: int, dst_cy: int,
+    node_w_emu: int, node_h_emu: int,
+    label_w_emu: int, label_h_emu: int,
+    *, is_back: bool, vertical: bool,
+) -> Tuple[int, int]:
+    """Place the condition label near the source exit, offset so it
+    never sits on the source or target node.
+
+    Rules:
+      * back edge (horizontal) — above the source (where the top-channel
+        U-turn starts).
+      * back edge (vertical)   — to the left of the source.
+      * forward (horizontal)   — to the right of the source, shifted
+        in y toward the destination so siblings with different dst y
+        separate naturally.
+      * forward (vertical)     — below the source, shifted in x toward
+        the destination for sibling separation.
+    """
+    half_w = node_w_emu // 2
+    half_h = node_h_emu // 2
+    lw = label_w_emu // 2
+    lh = label_h_emu // 2
+    gap = 10 * EMU_PER_PX
+
+    if vertical:
+        if is_back:
+            cx = src_cx - half_w - gap - lw
+            cy = src_cy
+        else:
+            # 25% along the path in x, a bit below src
+            cx = src_cx + (dst_cx - src_cx) // 4
+            cy = src_cy + half_h + gap + lh
+    else:
+        if is_back:
+            cx = src_cx
+            cy = src_cy - half_h - gap - lh
+        else:
+            cx = src_cx + half_w + gap + lw
+            # 25% along the path in y; places sibling labels apart when
+            # their destinations are in different lanes.
+            cy = src_cy + (dst_cy - src_cy) // 4
+    return cx - lw, cy - lh
 
 
 def _node_shape_xml(
