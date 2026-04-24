@@ -1,0 +1,19 @@
+flowchart TD
+  subgraph sales["営業部"]
+    n1(["受注"])
+    n2["注文入力"]
+    n3{"与信OK?"}
+  end
+  subgraph wh["倉庫"]
+    n4["出荷"]
+  end
+  subgraph acc["経理部"]
+    n5["売上計上"]
+    n6(["完了"])
+  end
+  n1 --> n2
+  n2 --> n3
+  n3 -->|OK| n4
+  n3 -->|NG| n1
+  n4 --> n5
+  n5 --> n6

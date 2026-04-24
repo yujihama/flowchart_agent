@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.vscode/
+.idea/
+
+# Local Claude Code settings (user-specific)
+.claude/
+
+# Excel lock files (created when the file is open)
+~$*.xlsx

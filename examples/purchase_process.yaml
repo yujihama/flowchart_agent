@@ -1,0 +1,78 @@
+# 購買プロセス業務フロー (J-SOX 3点セット用)
+#
+# フェーズ:
+#   1. 発注申請 → 金額別承認ルート (小額/大額、大額は部長承認)
+#   2. 購買 (相見積 → 発注書 → 送付)
+#   3. 納品・検収 (不合格なら返品して再発注)
+#   4. 請求・支払 (発注/検収/請求の三点照合、差異は再調査)
+#
+# 差戻しループ: 発注差戻し、相見積不足、検収不合格、三点照合差異
+
+lanes:
+  - {id: req,  name: 発注申請部}
+  - {id: mgr,  name: 部長}
+  - {id: buy,  name: 購買部}
+  - {id: wh,   name: 倉庫}
+  - {id: acc,  name: 経理部}
+
+nodes:
+  # --- 申請・承認 ---
+  - {id: n1,  lane: req,  label: "発注申請",   type: start}
+  - {id: n2,  lane: req,  label: "金額判定",   type: decision}
+  - {id: n3,  lane: mgr,  label: "部長承認",   type: decision}
+  - {id: n4,  lane: req,  label: "差戻し"}
+
+  # --- 購買 ---
+  - {id: n5,  lane: buy,  label: "見積依頼"}
+  - {id: n6,  lane: buy,  label: "見積受領"}
+  - {id: n7,  lane: buy,  label: "相見積比較", type: decision}
+  - {id: n8,  lane: buy,  label: "追加見積取得"}
+  - {id: n9,  lane: buy,  label: "発注書",     type: document}
+  - {id: n10, lane: buy,  label: "発注送付",   type: subprocess}
+
+  # --- 納品・検収 ---
+  - {id: n11, lane: wh,   label: "納品受取"}
+  - {id: n12, lane: wh,   label: "検収実施",   type: decision}
+  - {id: n13, lane: wh,   label: "返品手配"}
+  - {id: n14, lane: wh,   label: "検収報告書", type: document}
+
+  # --- 請求・支払 ---
+  - {id: n15, lane: acc,  label: "請求書受領"}
+  - {id: n16, lane: acc,  label: "三点照合",   type: decision}
+  - {id: n17, lane: acc,  label: "差異調査"}
+  - {id: n18, lane: acc,  label: "支払処理"}
+  - {id: n19, lane: acc,  label: "仕訳計上"}
+  - {id: n20, lane: acc,  label: "完了",       type: end}
+
+edges:
+  # 申請・承認
+  - {from: n1, to: n2}
+  - {from: n2, to: n5,  condition: "小額"}
+  - {from: n2, to: n3,  condition: "大額"}
+  - {from: n3, to: n5,  condition: "OK"}
+  - {from: n3, to: n4,  condition: "NG"}
+  - {from: n4, to: n1}               # 再申請へ戻す (BACK)
+
+  # 購買
+  - {from: n5, to: n6}
+  - {from: n6, to: n7}
+  - {from: n7, to: n9,  condition: "3社以上"}
+  - {from: n7, to: n8,  condition: "不足"}
+  - {from: n8, to: n6}               # 追加見積を受領へ (BACK)
+  - {from: n9, to: n10}
+
+  # 納品・検収
+  - {from: n10, to: n11}
+  - {from: n11, to: n12}
+  - {from: n12, to: n14, condition: "合格"}
+  - {from: n12, to: n13, condition: "不合格"}
+  - {from: n13, to: n10}             # 再発注 (BACK)
+
+  # 請求・支払
+  - {from: n14, to: n15}
+  - {from: n15, to: n16}
+  - {from: n16, to: n18, condition: "OK"}
+  - {from: n16, to: n17, condition: "NG"}
+  - {from: n17, to: n16}             # 調査後再照合 (BACK)
+  - {from: n18, to: n19}
+  - {from: n19, to: n20}

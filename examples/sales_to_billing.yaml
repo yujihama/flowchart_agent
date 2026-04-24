@@ -1,0 +1,28 @@
+# JSOX 業務フロー図 — 販売プロセス（最小サンプル）
+#
+# スキーマ:
+#   lanes[]: id, name
+#   nodes[]: id, lane, label, type?   (type デフォルト: task)
+#   edges[]: from, to, condition?
+# type の候補: start, end, task, decision, subprocess, document
+
+lanes:
+  - {id: sales, name: 営業部}
+  - {id: wh,    name: 倉庫}
+  - {id: acc,   name: 経理部}
+
+nodes:
+  - {id: n1, lane: sales, label: "受注",      type: start}
+  - {id: n2, lane: sales, label: "注文入力"}
+  - {id: n3, lane: sales, label: "与信OK?",   type: decision}
+  - {id: n4, lane: wh,    label: "出荷"}
+  - {id: n5, lane: acc,   label: "売上計上"}
+  - {id: n6, lane: acc,   label: "完了",      type: end}
+
+edges:
+  - {from: n1, to: n2}
+  - {from: n2, to: n3}
+  - {from: n3, to: n4, condition: OK}
+  - {from: n3, to: n1, condition: NG}
+  - {from: n4, to: n5}
+  - {from: n5, to: n6}

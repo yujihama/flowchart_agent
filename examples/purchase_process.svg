@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3380" height="610" viewBox="0 0 3380 610" font-family="-apple-system, Segoe UI, Meiryo, sans-serif" font-size="13">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
+<rect x="0" y="30" width="3380" height="110" fill="#f7f9fc" stroke="#8a99b3"/>
+<rect x="0" y="30" width="120" height="110" fill="#d4dff0" stroke="#8a99b3"/>
+<text x="60.0" y="85.0" text-anchor="middle" dominant-baseline="middle" font-weight="bold">発注申請部</text>
+<rect x="0" y="140" width="3380" height="110" fill="#eef2f8" stroke="#8a99b3"/>
+<rect x="0" y="140" width="120" height="110" fill="#d4dff0" stroke="#8a99b3"/>
+<text x="60.0" y="195.0" text-anchor="middle" dominant-baseline="middle" font-weight="bold">部長</text>
+<rect x="0" y="250" width="3380" height="110" fill="#f7f9fc" stroke="#8a99b3"/>
+<rect x="0" y="250" width="120" height="110" fill="#d4dff0" stroke="#8a99b3"/>
+<text x="60.0" y="305.0" text-anchor="middle" dominant-baseline="middle" font-weight="bold">購買部</text>
+<rect x="0" y="360" width="3380" height="110" fill="#eef2f8" stroke="#8a99b3"/>
+<rect x="0" y="360" width="120" height="110" fill="#d4dff0" stroke="#8a99b3"/>
+<text x="60.0" y="415.0" text-anchor="middle" dominant-baseline="middle" font-weight="bold">倉庫</text>
+<rect x="0" y="470" width="3380" height="110" fill="#f7f9fc" stroke="#8a99b3"/>
+<rect x="0" y="470" width="120" height="110" fill="#d4dff0" stroke="#8a99b3"/>
+<text x="60.0" y="525.0" text-anchor="middle" dominant-baseline="middle" font-weight="bold">経理部</text>
+<path d="M285.0,85.0 L310.0,85.0 L310.0,85.0 L335.0,85.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M475.0,85.0 L595.0,85.0 L595.0,305.0 L715.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="483.0" y="79.0" fill="#c0392b" font-weight="bold">小額</text>
+<path d="M475.0,85.0 L500.0,85.0 L500.0,195.0 L525.0,195.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="483.0" y="79.0" fill="#c0392b" font-weight="bold">大額</text>
+<path d="M665.0,195.0 L690.0,195.0 L690.0,305.0 L715.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="673.0" y="189.0" fill="#c0392b" font-weight="bold">OK</text>
+<path d="M665.0,195.0 L690.0,195.0 L690.0,85.0 L715.0,85.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="673.0" y="189.0" fill="#c0392b" font-weight="bold">NG</text>
+<path d="M785.0,59.0 L785.0,7.0 L215.0,7.0 L215.0,59.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M855.0,305.0 L880.0,305.0 L880.0,305.0 L905.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1045.0,305.0 L1070.0,305.0 L1070.0,305.0 L1095.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1235.0,305.0 L1260.0,305.0 L1260.0,305.0 L1285.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="1243.0" y="299.0" fill="#c0392b" font-weight="bold">3社以上</text>
+<path d="M1235.0,305.0 L1450.0,305.0 L1450.0,305.0 L1665.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="1243.0" y="299.0" fill="#c0392b" font-weight="bold">不足</text>
+<path d="M1735.0,279.0 L1735.0,7.0 L975.0,7.0 L975.0,279.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1425.0,305.0 L1450.0,305.0 L1450.0,305.0 L1475.0,305.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1615.0,305.0 L1640.0,305.0 L1640.0,415.0 L1665.0,415.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1805.0,415.0 L1830.0,415.0 L1830.0,415.0 L1855.0,415.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M1995.0,415.0 L2020.0,415.0 L2020.0,415.0 L2045.0,415.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="2003.0" y="409.0" fill="#c0392b" font-weight="bold">合格</text>
+<path d="M1995.0,415.0 L2115.0,415.0 L2115.0,415.0 L2235.0,415.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="2003.0" y="409.0" fill="#c0392b" font-weight="bold">不合格</text>
+<path d="M2305.0,389.0 L2305.0,7.0 L1545.0,7.0 L1545.0,279.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M2185.0,415.0 L2210.0,415.0 L2210.0,525.0 L2235.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M2375.0,525.0 L2400.0,525.0 L2400.0,525.0 L2425.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M2565.0,525.0 L2590.0,525.0 L2590.0,525.0 L2615.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="2573.0" y="519.0" fill="#c0392b" font-weight="bold">OK</text>
+<path d="M2565.0,525.0 L2875.0,525.0 L2875.0,525.0 L3185.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="2573.0" y="519.0" fill="#c0392b" font-weight="bold">NG</text>
+<path d="M3255.0,499.0 L3255.0,7.0 L2495.0,7.0 L2495.0,499.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M2755.0,525.0 L2780.0,525.0 L2780.0,525.0 L2805.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M2945.0,525.0 L2970.0,525.0 L2970.0,525.0 L2995.0,525.0" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="145.0" y="59.0" width="140" height="52" rx="26.0" ry="26.0" fill="#fff3cd" stroke="#333"/>
+<text x="215.0" y="85.0" text-anchor="middle" dominant-baseline="middle">発注申請</text>
+<polygon points="405.0,59.0 475.0,85.0 405.0,111.0 335.0,85.0" fill="#d1ecf1" stroke="#333"/>
+<text x="405.0" y="85.0" text-anchor="middle" dominant-baseline="middle">金額判定</text>
+<polygon points="595.0,169.0 665.0,195.0 595.0,221.0 525.0,195.0" fill="#d1ecf1" stroke="#333"/>
+<text x="595.0" y="195.0" text-anchor="middle" dominant-baseline="middle">部長承認</text>
+<rect x="715.0" y="59.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="785.0" y="85.0" text-anchor="middle" dominant-baseline="middle">差戻し</text>
+<rect x="715.0" y="279.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="785.0" y="305.0" text-anchor="middle" dominant-baseline="middle">見積依頼</text>
+<rect x="905.0" y="279.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="975.0" y="305.0" text-anchor="middle" dominant-baseline="middle">見積受領</text>
+<polygon points="1165.0,279.0 1235.0,305.0 1165.0,331.0 1095.0,305.0" fill="#d1ecf1" stroke="#333"/>
+<text x="1165.0" y="305.0" text-anchor="middle" dominant-baseline="middle">相見積比較</text>
+<rect x="1665.0" y="279.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="1735.0" y="305.0" text-anchor="middle" dominant-baseline="middle">追加見積取得</text>
+<path d="M1285.0,279.0 L1425.0,279.0 L1425.0,323.0 Q1390.0,335.0 1355.0,323.0 Q1320.0,311.0 1285.0,323.0 Z" fill="#fefefe" stroke="#333"/>
+<text x="1355.0" y="305.0" text-anchor="middle" dominant-baseline="middle">発注書</text>
+<rect x="1475.0" y="279.0" width="140" height="52" fill="#e2e3e5" stroke="#333"/>
+<line x1="1483.0" y1="279.0" x2="1483.0" y2="331.0" stroke="#333"/>
+<line x1="1607.0" y1="279.0" x2="1607.0" y2="331.0" stroke="#333"/>
+<text x="1545.0" y="305.0" text-anchor="middle" dominant-baseline="middle">発注送付</text>
+<rect x="1665.0" y="389.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="1735.0" y="415.0" text-anchor="middle" dominant-baseline="middle">納品受取</text>
+<polygon points="1925.0,389.0 1995.0,415.0 1925.0,441.0 1855.0,415.0" fill="#d1ecf1" stroke="#333"/>
+<text x="1925.0" y="415.0" text-anchor="middle" dominant-baseline="middle">検収実施</text>
+<rect x="2235.0" y="389.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="2305.0" y="415.0" text-anchor="middle" dominant-baseline="middle">返品手配</text>
+<path d="M2045.0,389.0 L2185.0,389.0 L2185.0,433.0 Q2150.0,445.0 2115.0,433.0 Q2080.0,421.0 2045.0,433.0 Z" fill="#fefefe" stroke="#333"/>
+<text x="2115.0" y="415.0" text-anchor="middle" dominant-baseline="middle">検収報告書</text>
+<rect x="2235.0" y="499.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="2305.0" y="525.0" text-anchor="middle" dominant-baseline="middle">請求書受領</text>
+<polygon points="2495.0,499.0 2565.0,525.0 2495.0,551.0 2425.0,525.0" fill="#d1ecf1" stroke="#333"/>
+<text x="2495.0" y="525.0" text-anchor="middle" dominant-baseline="middle">三点照合</text>
+<rect x="3185.0" y="499.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="3255.0" y="525.0" text-anchor="middle" dominant-baseline="middle">差異調査</text>
+<rect x="2615.0" y="499.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="2685.0" y="525.0" text-anchor="middle" dominant-baseline="middle">支払処理</text>
+<rect x="2805.0" y="499.0" width="140" height="52" fill="#ffffff" stroke="#333"/>
+<text x="2875.0" y="525.0" text-anchor="middle" dominant-baseline="middle">仕訳計上</text>
+<rect x="2995.0" y="499.0" width="140" height="52" rx="26.0" ry="26.0" fill="#fff3cd" stroke="#333"/>
+<text x="3065.0" y="525.0" text-anchor="middle" dominant-baseline="middle">完了</text>
+</svg>
