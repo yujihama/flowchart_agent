@@ -11,3 +11,6 @@ venv/
 
 # Excel lock files (created when the file is open)
 ~$*.xlsx
+
+# Node dependencies for the layout engine (installed via npm ci / Dockerfile)
+jsox_flow/layout/node_modules/

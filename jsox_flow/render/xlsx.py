@@ -1,17 +1,22 @@
 """Excel (.xlsx) renderer — real Shape objects + swimlane background.
 
-Design (C: area-separation)
----------------------------
+Design
+------
 * Sheet ``フロー図``: swimlane bands as cell backgrounds + nodes/edges as
   real Excel Shape objects (drawing). The user can drag, resize and retext
   shapes; the sheet as a whole is overwritten on regeneration.
 * Sheet ``注記``: free-form notes. Preserved across regeneration — if the
   target file already exists, its ``注記`` sheet is read and carried over.
 
-Orientation
------------
-``vertical=False`` (default): lanes are horizontal bands, flow goes LEFT->RIGHT.
-``vertical=True``: lanes are vertical columns, flow goes TOP->BOTTOM.
+Layout
+------
+All rank / collision / back-edge classification lives in
+:mod:`jsox_flow.layout`. This module consumes a :class:`LayoutResult` and
+translates its px coordinates into Excel's EMU / cell-anchor space.
+
+Back-edge routing is delegated to Excel itself: connectors are wired via
+``stCxn``/``endCxn`` to ``bentConnector3`` shapes and Excel auto-routes.
+No custom "top channel" logic here.
 
 Implementation
 --------------
@@ -29,15 +34,15 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape as xml_escape
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .._layout import assign_columns, back_edges, resolve_cell_collisions
-from ..model import Edge, Flow, Node
+from ..layout import LayoutOptions, LayoutResult, compute_layout
+from ..model import Flow, Node
 
 
 # --- EMU conversion ---------------------------------------------------------
@@ -45,30 +50,10 @@ from ..model import Edge, Flow, Node
 EMU_PER_PX = 9525
 EMU_PER_PT = 12700
 PX_PER_CHAR = 7.0
+PX_PER_PT = 96 / 72
 
 
-# --- grid dimensions --------------------------------------------------------
-# Horizontal (default)
-H_HEADER_WIDTH_CHARS = 14
-H_STEP_WIDTH_CHARS = 22
-H_ROW_LANE_HEIGHT_PT = 90
-H_ROW_TOP_CHANNEL_HEIGHT_PT = 28
-# Vertical
-V_LEFT_CHANNEL_WIDTH_CHARS = 10
-V_LANE_WIDTH_CHARS = 24
-V_ROW_STEP_HEIGHT_PT = 70
-V_ROW_LANE_HEADER_HEIGHT_PT = 32
-# Common
-ROW_TITLE_HEIGHT_PT = 28
-ROW_WARNING_HEIGHT_PT = 32
-
-NODE_W_PX = 130
-NODE_H_PX = 46
-LABEL_W_PX = 50
-LABEL_H_PX = 18
-
-
-# --- sheet addressing -------------------------------------------------------
+# --- sheet structure --------------------------------------------------------
 
 SHEET_FLOW = "フロー図"
 SHEET_NOTES = "注記"
@@ -76,17 +61,21 @@ SHEET_NOTES = "注記"
 TITLE_ROW = 1
 WARNING_ROW = 2
 
-# Horizontal body starts at row 4 and col B. Channel is row 3.
-H_TOP_CHANNEL_ROW = 3
-H_FIRST_LANE_ROW = 4
+# Horizontal: lane-header in col A, one cell per rank from col B.
+H_FIRST_LANE_ROW = 3
 H_LANE_HEADER_COL = 1
 H_FIRST_STEP_COL = 2
 
-# Vertical body starts at row 4 and col B. Lane header is row 3, left channel is col A.
+# Vertical: lane-header in row 3, one cell per rank from row 4.
 V_LANE_HEADER_ROW = 3
+V_FIRST_LANE_COL = 1
 V_FIRST_STEP_ROW = 4
-V_LEFT_CHANNEL_COL = 1
-V_FIRST_LANE_COL = 2
+
+ROW_TITLE_HEIGHT_PT = 28
+ROW_WARNING_HEIGHT_PT = 32
+
+H_HEADER_WIDTH_CHARS = 14
+V_LEFT_CHANNEL_WIDTH_CHARS = 12  # unused cell for aesthetics in vertical
 
 
 # --- styling ----------------------------------------------------------------
@@ -114,75 +103,142 @@ WARNING_FILL = "FFF2CC"
 EDGE_COLOR = "333333"
 LABEL_COLOR = "C0392B"
 
+LABEL_W_PX = 50
+LABEL_H_PX = 18
 
-# --- layout record ----------------------------------------------------------
+
+# --- connection-point indices ----------------------------------------------
+# per the OOXML preset definitions (<cxnLst> order) for all the flowChart*
+# presets we emit: TOP, LEFT, BOTTOM, RIGHT.
+SITE_TOP = 0
+SITE_LEFT = 1
+SITE_BOTTOM = 2
+SITE_RIGHT = 3
+
+
+# --- grid record -----------------------------------------------------------
 
 @dataclass
-class _Layout:
+class _Grid:
+    """The Excel cell grid used as a visual backing for the swimlanes."""
     vertical: bool
     n_lanes: int
-    n_steps: int
-    col_widths_chars: List[float]   # widths per col, 1-indexed (index 0 unused)
+    n_ranks: int
+    col_widths_chars: List[float]   # 1-indexed; index 0 unused
     row_heights_pt: List[float]
-    col_edges_emu: List[int]
+    col_edges_emu: List[int]        # cumulative EMU at each column edge
     row_edges_emu: List[int]
 
-    def node_cell(self, lane_idx: int, step_idx: int) -> Tuple[int, int]:
-        """Return (excel_row, excel_col), both 1-indexed."""
+    def body_origin_emu(self) -> Tuple[int, int]:
+        """(x, y) EMU offset from top-left of sheet to top-left of body."""
         if self.vertical:
-            return (V_FIRST_STEP_ROW + step_idx, V_FIRST_LANE_COL + lane_idx)
-        return (H_FIRST_LANE_ROW + lane_idx, H_FIRST_STEP_COL + step_idx)
-
-    def lane_header_cell(self, lane_idx: int) -> Tuple[int, int]:
-        if self.vertical:
-            return (V_LANE_HEADER_ROW, V_FIRST_LANE_COL + lane_idx)
-        return (H_FIRST_LANE_ROW + lane_idx, H_LANE_HEADER_COL)
+            # body starts at col B (index 1 edge) and row 4 (index 3 edge)
+            return (self.col_edges_emu[V_FIRST_LANE_COL - 1],
+                    self.row_edges_emu[V_FIRST_STEP_ROW - 1])
+        return (self.col_edges_emu[H_FIRST_STEP_COL - 1],
+                self.row_edges_emu[H_FIRST_LANE_ROW - 1])
 
     def last_col(self) -> int:
         if self.vertical:
             return V_FIRST_LANE_COL + self.n_lanes - 1
-        return H_FIRST_STEP_COL + self.n_steps - 1
+        return H_FIRST_STEP_COL + self.n_ranks - 1
 
     def last_row(self) -> int:
         if self.vertical:
-            return V_FIRST_STEP_ROW + self.n_steps - 1
+            return V_FIRST_STEP_ROW + self.n_ranks - 1
         return H_FIRST_LANE_ROW + self.n_lanes - 1
 
-    def back_channel_pos_emu(self) -> int:
-        """Center of the back-edge channel along the flow axis (EMU)."""
-        if self.vertical:
-            # back edges travel along col A (LEFT channel) — return center x
-            ci = V_LEFT_CHANNEL_COL - 1
-            return (self.col_edges_emu[ci] + self.col_edges_emu[ci + 1]) // 2
-        # horizontal: back edges travel along row 3 (TOP channel) — return center y
-        ri = H_TOP_CHANNEL_ROW - 1
-        return (self.row_edges_emu[ri] + self.row_edges_emu[ri + 1]) // 2
+
+# --- public API -------------------------------------------------------------
+
+def save_xlsx(
+    flow: Flow,
+    path: Union[str, Path],
+    *,
+    vertical: bool = False,
+    layout: Optional[LayoutResult] = None,
+    return_layout: bool = False,
+) -> Union[Path, Tuple[Path, LayoutResult]]:
+    """Render ``flow`` to an .xlsx file.
+
+    Parameters
+    ----------
+    layout:
+        Optional pre-computed layout. If omitted, one is computed with
+        the default :class:`LayoutOptions` for the requested orientation.
+    return_layout:
+        If True, return a ``(path, layout)`` tuple so the caller (agent)
+        can inspect metrics / warnings without recomputing.
+    """
+    target = Path(path)
+    preserved_notes = _extract_notes(target)
+
+    orientation = "vertical" if vertical else "horizontal"
+    if layout is None:
+        layout = compute_layout(flow, LayoutOptions(orientation=orientation))
+    elif layout.orientation != orientation:
+        raise ValueError(
+            f"layout.orientation={layout.orientation!r} but "
+            f"vertical={vertical!r} requires {orientation!r}"
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SHEET_FLOW
+
+    grid = _make_grid(flow, layout)
+    _build_flow_sheet(ws, flow, layout, grid)
+
+    notes_ws = wb.create_sheet(SHEET_NOTES)
+    _build_notes_sheet(notes_ws, preserved_notes)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    drawing_xml = _build_drawing_xml(flow, layout, grid)
+    final_bytes = _inject_drawing(buf.getvalue(), drawing_xml)
+    target.write_bytes(final_bytes)
+
+    if return_layout:
+        return target, layout
+    return target
 
 
-def _make_layout(flow: Flow, max_step_idx: int, vertical: bool) -> _Layout:
-    n_lanes = len(flow.lanes)
-    n_steps = max_step_idx + 1
+# --- grid construction ------------------------------------------------------
+
+def _make_grid(flow: Flow, layout: LayoutResult) -> _Grid:
+    vertical = layout.orientation == "vertical"
+    n_lanes = len(layout.lane_order)
+    n_ranks = layout.metrics.n_ranks or 1
+
+    # Convert px grid sizes to Excel cell sizes.
+    step_size_px = _step_size_px(layout)
+    lane_size_px = _lane_size_px(layout)
+
+    step_width_chars = step_size_px / PX_PER_CHAR
+    lane_height_pt = lane_size_px / PX_PER_PT
+    lane_width_chars = lane_size_px / PX_PER_CHAR
+    step_height_pt = step_size_px / PX_PER_PT
 
     if vertical:
         col_widths_chars = [0.0, V_LEFT_CHANNEL_WIDTH_CHARS]
-        col_widths_chars.extend([V_LANE_WIDTH_CHARS] * n_lanes)
+        col_widths_chars.extend([lane_width_chars] * n_lanes)
         row_heights_pt = [
             0.0,
             ROW_TITLE_HEIGHT_PT,
             ROW_WARNING_HEIGHT_PT,
-            V_ROW_LANE_HEADER_HEIGHT_PT,
+            lane_size_px / PX_PER_PT / 2,   # lane header row
         ]
-        row_heights_pt.extend([V_ROW_STEP_HEIGHT_PT] * n_steps)
+        row_heights_pt.extend([step_height_pt] * n_ranks)
     else:
         col_widths_chars = [0.0, H_HEADER_WIDTH_CHARS]
-        col_widths_chars.extend([H_STEP_WIDTH_CHARS] * n_steps)
+        col_widths_chars.extend([step_width_chars] * n_ranks)
         row_heights_pt = [
             0.0,
             ROW_TITLE_HEIGHT_PT,
             ROW_WARNING_HEIGHT_PT,
-            H_ROW_TOP_CHANNEL_HEIGHT_PT,
         ]
-        row_heights_pt.extend([H_ROW_LANE_HEIGHT_PT] * n_lanes)
+        row_heights_pt.extend([lane_height_pt] * n_lanes)
 
     col_edges = [0]
     for w in col_widths_chars[1:]:
@@ -191,10 +247,10 @@ def _make_layout(flow: Flow, max_step_idx: int, vertical: bool) -> _Layout:
     for h in row_heights_pt[1:]:
         row_edges.append(row_edges[-1] + int(h * EMU_PER_PT))
 
-    return _Layout(
+    return _Grid(
         vertical=vertical,
         n_lanes=n_lanes,
-        n_steps=n_steps,
+        n_ranks=n_ranks,
         col_widths_chars=col_widths_chars,
         row_heights_pt=row_heights_pt,
         col_edges_emu=col_edges,
@@ -202,34 +258,18 @@ def _make_layout(flow: Flow, max_step_idx: int, vertical: bool) -> _Layout:
     )
 
 
-# --- public API -------------------------------------------------------------
+def _step_size_px(layout: LayoutResult) -> int:
+    if layout.metrics.n_ranks <= 1:
+        return layout.canvas_width if layout.orientation == "horizontal" else layout.canvas_height
+    total = layout.canvas_width if layout.orientation == "horizontal" else layout.canvas_height
+    return total // layout.metrics.n_ranks
 
-def save_xlsx(flow: Flow, path: Union[str, Path], *, vertical: bool = False) -> Path:
-    target = Path(path)
-    preserved_notes = _extract_notes(target)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = SHEET_FLOW
-
-    cols = assign_columns(flow)
-    cols = resolve_cell_collisions(flow, cols)
-    back = back_edges(flow, cols)
-    max_step = max(cols.values()) if cols else 0
-    layout = _make_layout(flow, max_step, vertical)
-
-    _build_flow_sheet(ws, flow, layout)
-
-    notes_ws = wb.create_sheet(SHEET_NOTES)
-    _build_notes_sheet(notes_ws, preserved_notes)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-
-    drawing_xml = _build_drawing_xml(flow, cols, back, layout)
-    final_bytes = _inject_drawing(buf.getvalue(), drawing_xml)
-    target.write_bytes(final_bytes)
-    return target
+def _lane_size_px(layout: LayoutResult) -> int:
+    if layout.metrics.n_lanes <= 0:
+        return 120
+    total = layout.canvas_height if layout.orientation == "horizontal" else layout.canvas_width
+    return total // layout.metrics.n_lanes
 
 
 # --- notes sheet preservation ----------------------------------------------
@@ -265,18 +305,20 @@ def _build_notes_sheet(ws, preserved: List[List]) -> None:
 
 # --- flow sheet (cells) -----------------------------------------------------
 
-def _build_flow_sheet(ws, flow: Flow, layout: _Layout) -> None:
-    for c in range(1, len(layout.col_widths_chars)):
-        ws.column_dimensions[get_column_letter(c)].width = layout.col_widths_chars[c]
-    for r in range(1, len(layout.row_heights_pt)):
-        ws.row_dimensions[r].height = layout.row_heights_pt[r]
+def _build_flow_sheet(
+    ws, flow: Flow, layout: LayoutResult, grid: _Grid,
+) -> None:
+    for c in range(1, len(grid.col_widths_chars)):
+        ws.column_dimensions[get_column_letter(c)].width = grid.col_widths_chars[c]
+    for r in range(1, len(grid.row_heights_pt)):
+        ws.row_dimensions[r].height = grid.row_heights_pt[r]
 
-    last_col = layout.last_col()
-    last_row = layout.last_row()
+    last_col = grid.last_col()
+    last_row = grid.last_row()
 
     _write_title(ws, last_col)
-    _write_warning(ws, last_col)
-    _write_lane_bands(ws, flow, layout, last_row, last_col)
+    _write_warning(ws, last_col, layout.warnings)
+    _write_lane_bands(ws, flow, layout, grid, last_row, last_col)
 
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "B4"
@@ -294,12 +336,14 @@ def _write_title(ws, last_col: int) -> None:
     c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
 
-def _write_warning(ws, last_col: int) -> None:
+def _write_warning(ws, last_col: int, layout_warnings: List[str]) -> None:
     msg = (
         "⚠ このシートは自動生成です。図形はドラッグ/リサイズ/テキスト編集できますが、"
         "再生成時に「フロー図」シートは上書きされます。"
         "手書きメモは「注記」シートに残してください。"
     )
+    if layout_warnings:
+        msg += " [layout warnings: " + " / ".join(layout_warnings[:3]) + "]"
     ws.cell(WARNING_ROW, 1, msg)
     ws.merge_cells(
         start_row=WARNING_ROW, start_column=1,
@@ -312,48 +356,50 @@ def _write_warning(ws, last_col: int) -> None:
 
 
 def _write_lane_bands(
-    ws, flow: Flow, layout: _Layout, last_row: int, last_col: int
+    ws, flow: Flow, layout: LayoutResult, grid: _Grid,
+    last_row: int, last_col: int,
 ) -> None:
     thin = Side(style="thin", color="8A99B3")
     body_border = Border(left=thin, right=thin, top=thin, bottom=thin)
     medium = Side(style="medium", color="333333")
     header_border = Border(left=medium, right=medium, top=medium, bottom=medium)
 
-    for i, lane in enumerate(flow.lanes):
+    lane_by_id = {l.id: l for l in flow.lanes}
+
+    for i, lane_id in enumerate(layout.lane_order):
+        lane = lane_by_id[lane_id]
         fill = PatternFill("solid", fgColor=LANE_BODY_FILLS[i % 2])
 
-        if layout.vertical:
+        if grid.vertical:
             lane_col = V_FIRST_LANE_COL + i
+            # Lane header in row 3
+            hdr = ws.cell(V_LANE_HEADER_ROW, lane_col, lane.name)
+            hdr.fill = PatternFill("solid", fgColor=LANE_HEADER_FILL)
+            hdr.font = Font(bold=True, size=12)
+            hdr.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            hdr.border = header_border
             for r in range(V_FIRST_STEP_ROW, last_row + 1):
                 cell = ws.cell(r, lane_col)
                 cell.fill = fill
                 cell.border = body_border
         else:
             lane_row = H_FIRST_LANE_ROW + i
+            hdr = ws.cell(lane_row, H_LANE_HEADER_COL, lane.name)
+            hdr.fill = PatternFill("solid", fgColor=LANE_HEADER_FILL)
+            hdr.font = Font(bold=True, size=12)
+            hdr.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            hdr.border = header_border
             for c in range(H_FIRST_STEP_COL, last_col + 1):
                 cell = ws.cell(lane_row, c)
                 cell.fill = fill
                 cell.border = body_border
 
-        hdr_r, hdr_c = layout.lane_header_cell(i)
-        header = ws.cell(hdr_r, hdr_c, lane.name)
-        header.fill = PatternFill("solid", fgColor=LANE_HEADER_FILL)
-        header.font = Font(bold=True, size=12)
-        header.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
-        )
-        header.border = header_border
 
-
-# --- cell / EMU helpers -----------------------------------------------------
-
-def _cell_center(excel_row: int, excel_col: int, layout: _Layout) -> Tuple[int, int]:
-    ci = excel_col - 1
-    ri = excel_row - 1
-    x = (layout.col_edges_emu[ci] + layout.col_edges_emu[ci + 1]) // 2
-    y = (layout.row_edges_emu[ri] + layout.row_edges_emu[ri + 1]) // 2
-    return x, y
-
+# --- EMU helpers -----------------------------------------------------------
 
 def _emu_to_cell(emu: int, edges: List[int]) -> Tuple[int, int]:
     for i in range(len(edges) - 1):
@@ -363,12 +409,12 @@ def _emu_to_cell(emu: int, edges: List[int]) -> Tuple[int, int]:
 
 
 def _two_cell_anchor(
-    x_emu: int, y_emu: int, w_emu: int, h_emu: int, layout: _Layout,
+    x_emu: int, y_emu: int, w_emu: int, h_emu: int, grid: _Grid,
 ) -> str:
-    fc, fco = _emu_to_cell(x_emu, layout.col_edges_emu)
-    fr, fro = _emu_to_cell(y_emu, layout.row_edges_emu)
-    tc, tco = _emu_to_cell(x_emu + w_emu, layout.col_edges_emu)
-    tr, tro = _emu_to_cell(y_emu + h_emu, layout.row_edges_emu)
+    fc, fco = _emu_to_cell(x_emu, grid.col_edges_emu)
+    fr, fro = _emu_to_cell(y_emu, grid.row_edges_emu)
+    tc, tco = _emu_to_cell(x_emu + w_emu, grid.col_edges_emu)
+    tr, tro = _emu_to_cell(y_emu + h_emu, grid.row_edges_emu)
     return (
         f'<xdr:from><xdr:col>{fc}</xdr:col><xdr:colOff>{fco}</xdr:colOff>'
         f'<xdr:row>{fr}</xdr:row><xdr:rowOff>{fro}</xdr:rowOff></xdr:from>'
@@ -378,36 +424,19 @@ def _two_cell_anchor(
 
 
 # --- drawing XML ------------------------------------------------------------
-# Connection-point indices for the flowChart* preset geometries we use.
-# Per the OOXML preset definitions (<cxnLst> order), flowChartProcess /
-# flowChartDecision / flowChartTerminator / flowChartDocument all expose
-# their four sites in the order: TOP, LEFT, BOTTOM, RIGHT.
-SITE_TOP = 0
-SITE_LEFT = 1
-SITE_BOTTOM = 2
-SITE_RIGHT = 3
-
 
 def _build_drawing_xml(
-    flow: Flow, cols: Dict[str, int], back: set, layout: _Layout,
+    flow: Flow, layout: LayoutResult, grid: _Grid,
 ) -> str:
-    lane_idx = {lane.id: i for i, lane in enumerate(flow.lanes)}
+    ox, oy = grid.body_origin_emu()
 
-    # Each outgoing edge gets an index among its siblings so that multiple
-    # edges leaving the same source node can be placed on different sides.
-    outgoing: Dict[str, List[Edge]] = {}
-    for e in flow.edges:
-        outgoing.setdefault(e.from_id, []).append(e)
+    node_shape_id: Dict[str, int] = {}
+    next_id = 2
+    for nid in layout.nodes:
+        node_shape_id[nid] = next_id
+        next_id += 1
 
-    node_center: Dict[str, Tuple[int, int]] = {}
-    for n in flow.nodes:
-        erow, ecol = layout.node_cell(lane_idx[n.lane_id], cols[n.id])
-        node_center[n.id] = _cell_center(erow, ecol, layout)
-
-    node_w_emu = NODE_W_PX * EMU_PER_PX
-    node_h_emu = NODE_H_PX * EMU_PER_PX
-    label_w_emu = LABEL_W_PX * EMU_PER_PX
-    label_h_emu = LABEL_H_PX * EMU_PER_PX
+    node_by_id = {n.id: n for n in flow.nodes}
 
     parts: List[str] = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -416,101 +445,51 @@ def _build_drawing_xml(
         ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
     ]
 
-    # Assign Shape IDs for every node up front so connectors can reference them.
-    node_shape_id: Dict[str, int] = {}
-    next_id = 2
-    for n in flow.nodes:
-        node_shape_id[n.id] = next_id
-        next_id += 1
-
-    get_node = {n.id: n for n in flow.nodes}
-
-    for n in flow.nodes:
-        cx, cy = node_center[n.id]
-        x = cx - node_w_emu // 2
-        y = cy - node_h_emu // 2
+    for nid, nl in layout.nodes.items():
+        node = node_by_id[nid]
+        w_emu = nl.width * EMU_PER_PX
+        h_emu = nl.height * EMU_PER_PX
+        x_emu = ox + nl.x * EMU_PER_PX - w_emu // 2
+        y_emu = oy + nl.y * EMU_PER_PX - h_emu // 2
         parts.append(_node_shape_xml(
-            node_shape_id[n.id], n, x, y, node_w_emu, node_h_emu, layout
+            node_shape_id[nid], node, x_emu, y_emu, w_emu, h_emu, grid,
         ))
 
-    back_channel = layout.back_channel_pos_emu()
+    label_w_emu = LABEL_W_PX * EMU_PER_PX
+    label_h_emu = LABEL_H_PX * EMU_PER_PX
 
-    for e in flow.edges:
-        src = get_node[e.from_id]
-        dst = get_node[e.to_id]
-        is_back = (e.from_id, e.to_id) in back
-        siblings = outgoing[e.from_id]
-        edge_idx = siblings.index(e)
-        n_siblings = len(siblings)
+    for e in layout.edges:
+        src_nl = layout.nodes[e.from_id]
+        dst_nl = layout.nodes[e.to_id]
+        src_cx = ox + src_nl.x * EMU_PER_PX
+        src_cy = oy + src_nl.y * EMU_PER_PX
+        dst_cx = ox + dst_nl.x * EMU_PER_PX
+        dst_cy = oy + dst_nl.y * EMU_PER_PX
+        w_emu = src_nl.width * EMU_PER_PX
+        h_emu = src_nl.height * EMU_PER_PX
 
-        if is_back:
-            # Back edges: manual 3-segment U-route. bentConnector3 can't
-            # produce a clean U when both endpoints are on the same side.
-            src_site, _ = _pick_sites(
-                src, dst, is_back, layout.vertical,
-                lane_idx, edge_idx, n_siblings,
-            )
-            sx, sy = node_center[src.id]
-            dx, dy = node_center[dst.id]
-            for seg_start, seg_end, has_arrow in _back_edge_segments(
-                sx, sy, dx, dy, node_w_emu, node_h_emu,
-                back_channel, layout.vertical,
-            ):
-                parts.append(_straight_connector_xml(
-                    next_id, seg_start, seg_end, has_arrow, layout,
-                ))
-                next_id += 1
-
-            if e.condition:
-                lx, ly = _label_near_site(
-                    node_center[src.id], src_site, node_w_emu, node_h_emu,
-                )
-                parts.append(_label_xml(
-                    next_id,
-                    lx - label_w_emu // 2,
-                    ly - label_h_emu // 2,
-                    label_w_emu, label_h_emu,
-                    e.condition, layout,
-                ))
-                next_id += 1
-            continue
-
-        # Forward edges: use bentConnector3 wired to shape connection points
-        # so Excel auto-routes and the connector sticks to the shapes.
-        src_site, dst_site = _pick_sites(
-            src, dst, is_back, layout.vertical,
-            lane_idx, edge_idx, n_siblings,
-        )
-
-        src_pt = _site_position(
-            node_center[src.id], node_w_emu, node_h_emu, src_site
-        )
-        dst_pt = _site_position(
-            node_center[dst.id], node_w_emu, node_h_emu, dst_site
-        )
-
-        bx, by, bw, bh, flip_h, flip_v = _connector_bbox(
-            src_pt, dst_pt, is_back, layout.vertical,
-        )
+        # Let Excel auto-route: bentConnector3 wired via stCxn/endCxn.
+        # Bounding box is just a routing hint; Excel re-computes on save.
+        bx = min(src_cx, dst_cx) - w_emu // 2
+        by = min(src_cy, dst_cy) - h_emu // 2
+        bw = max(abs(dst_cx - src_cx), 1)
+        bh = max(abs(dst_cy - src_cy), 1)
+        flip_h = src_cx > dst_cx
+        flip_v = src_cy > dst_cy
 
         parts.append(_bent_connector_xml(
             next_id,
-            node_shape_id[src.id], src_site,
-            node_shape_id[dst.id], dst_site,
-            bx, by, bw, bh, flip_h, flip_v, layout,
+            node_shape_id[e.from_id], SITE_RIGHT if not grid.vertical else SITE_BOTTOM,
+            node_shape_id[e.to_id],   SITE_LEFT  if not grid.vertical else SITE_TOP,
+            bx, by, bw, bh, flip_h, flip_v, grid,
         ))
         next_id += 1
 
         if e.condition:
-            lx, ly = _label_near_site(
-                node_center[src.id], src_site, node_w_emu, node_h_emu,
-            )
+            lx = (src_cx + dst_cx) // 2 - label_w_emu // 2
+            ly = (src_cy + dst_cy) // 2 - label_h_emu // 2
             parts.append(_label_xml(
-                next_id,
-                lx - label_w_emu // 2,
-                ly - label_h_emu // 2,
-                label_w_emu, label_h_emu,
-                e.condition, layout,
+                next_id, lx, ly, label_w_emu, label_h_emu, e.condition, grid,
             ))
             next_id += 1
 
@@ -518,199 +497,16 @@ def _build_drawing_xml(
     return "\n".join(parts)
 
 
-def _back_edge_segments(
-    sx: int, sy: int, dx: int, dy: int,
-    node_w: int, node_h: int,
-    back_channel: int, vertical: bool,
-) -> List[Tuple[Tuple[int, int], Tuple[int, int], bool]]:
-    """Three straight segments forming a U-route in the back-edge channel."""
-    hw = node_w // 2
-    hh = node_h // 2
-    if vertical:
-        p0 = (sx - hw, sy)            # exit left of source
-        p1 = (back_channel, sy)       # into left channel
-        p2 = (back_channel, dy)       # up to target row
-        p3 = (dx - hw, dy)            # right into target's left
-    else:
-        p0 = (sx, sy - hh)            # exit top of source
-        p1 = (sx, back_channel)       # into top channel
-        p2 = (dx, back_channel)       # across to target column
-        p3 = (dx, dy - hh)            # down into target's top
-    return [(p0, p1, False), (p1, p2, False), (p2, p3, True)]
-
-
-def _straight_connector_xml(
-    conn_id: int, start: Tuple[int, int], end: Tuple[int, int],
-    has_arrow: bool, layout: _Layout,
-) -> str:
-    sx, sy = start
-    ex, ey = end
-    bx = min(sx, ex)
-    by = min(sy, ey)
-    dx_abs = abs(ex - sx)
-    dy_abs = abs(ey - sy)
-
-    # Keep the perpendicular dimension at 0 so corner points align exactly.
-    if dy_abs == 0:
-        bw = max(dx_abs, 1)
-        bh = 0
-    elif dx_abs == 0:
-        bw = 0
-        bh = max(dy_abs, 1)
-    else:
-        bw = dx_abs
-        bh = dy_abs
-
-    flips = []
-    if has_arrow:
-        if sx > ex:
-            flips.append('flipH="1"')
-        if sy > ey:
-            flips.append('flipV="1"')
-    flip_attr = (" " + " ".join(flips)) if flips else ""
-
-    arrow = '<a:tailEnd type="triangle"/>' if has_arrow else ""
-    anchor = _two_cell_anchor(bx, by, bw, bh, layout)
-
-    return (
-        '<xdr:twoCellAnchor editAs="oneCell">'
-        f'{anchor}'
-        '<xdr:cxnSp macro="">'
-        f'<xdr:nvCxnSpPr><xdr:cNvPr id="{conn_id}" name="Back_{conn_id}"/>'
-        '<xdr:cNvCxnSpPr/></xdr:nvCxnSpPr>'
-        '<xdr:spPr>'
-        f'<a:xfrm{flip_attr}><a:off x="{bx}" y="{by}"/><a:ext cx="{bw}" cy="{bh}"/></a:xfrm>'
-        '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>'
-        f'<a:ln w="12700"><a:solidFill><a:srgbClr val="{EDGE_COLOR}"/></a:solidFill>'
-        f'{arrow}</a:ln>'
-        '</xdr:spPr>'
-        '</xdr:cxnSp>'
-        '<xdr:clientData/>'
-        '</xdr:twoCellAnchor>'
-    )
-
-
-# --- connection-site selection ----------------------------------------------
-
-def _pick_sites(
-    src: Node, dst: Node, is_back: bool, vertical: bool,
-    lane_idx: Dict[str, int], edge_idx: int, n_siblings: int,
-) -> Tuple[int, int]:
-    """Return (src_site, dst_site) for a connector.
-
-    Multiple edges from the same source are placed on different sides so
-    their labels do not pile up.
-    """
-    src_lane = lane_idx[src.lane_id]
-    dst_lane = lane_idx[dst.lane_id]
-
-    if vertical:
-        if is_back:
-            # exit LEFT / enter LEFT → Excel draws a U around the left
-            return SITE_LEFT, SITE_LEFT
-
-        if n_siblings == 1:
-            return SITE_BOTTOM, SITE_TOP
-
-        # multiple forward siblings: first goes straight down,
-        # the rest exit sideways toward their destination lane
-        if edge_idx == 0:
-            return SITE_BOTTOM, SITE_TOP
-        if dst_lane > src_lane:
-            return SITE_RIGHT, SITE_TOP
-        if dst_lane < src_lane:
-            return SITE_LEFT, SITE_TOP
-        # same-lane sibling: alternate left/right
-        return (SITE_RIGHT if edge_idx % 2 == 1 else SITE_LEFT), SITE_TOP
-
-    # horizontal flow
-    if is_back:
-        return SITE_TOP, SITE_TOP
-
-    if n_siblings == 1:
-        return SITE_RIGHT, SITE_LEFT
-
-    if edge_idx == 0:
-        return SITE_RIGHT, SITE_LEFT
-    if dst_lane > src_lane:
-        return SITE_BOTTOM, SITE_LEFT
-    if dst_lane < src_lane:
-        return SITE_TOP, SITE_LEFT
-    return (SITE_BOTTOM if edge_idx % 2 == 1 else SITE_TOP), SITE_LEFT
-
-
-def _site_position(
-    center: Tuple[int, int], node_w: int, node_h: int, site: int,
-) -> Tuple[int, int]:
-    cx, cy = center
-    hw = node_w // 2
-    hh = node_h // 2
-    if site == SITE_TOP:    return (cx, cy - hh)
-    if site == SITE_RIGHT:  return (cx + hw, cy)
-    if site == SITE_BOTTOM: return (cx, cy + hh)
-    return (cx - hw, cy)    # SITE_LEFT
-
-
-def _label_near_site(
-    center: Tuple[int, int], site: int, node_w: int, node_h: int,
-) -> Tuple[int, int]:
-    """Anchor the label next to the connector's exit site on the source."""
-    cx, cy = center
-    hw = node_w // 2
-    hh = node_h // 2
-    gap = 14 * EMU_PER_PX
-    if site == SITE_TOP:    return (cx, cy - hh - gap)
-    if site == SITE_RIGHT:  return (cx + hw + gap, cy)
-    if site == SITE_BOTTOM: return (cx, cy + hh + gap)
-    return (cx - hw - gap, cy)
-
-
-def _connector_bbox(
-    src_pt: Tuple[int, int], dst_pt: Tuple[int, int],
-    is_back: bool, vertical: bool,
-) -> Tuple[int, int, int, int, bool, bool]:
-    """Compute the xfrm hint bbox for bentConnector3.
-
-    For back-edges we extend the bbox outward (left in vertical mode, up in
-    horizontal mode) so that bentConnector3 has room to route the U-turn
-    rather than collapsing to a straight line.
-    """
-    sx, sy = src_pt
-    dx, dy = dst_pt
-
-    if is_back and vertical:
-        detour = 70 * EMU_PER_PX  # extend leftward past the back-channel
-        bx = min(sx, dx) - detour
-        by = min(sy, dy)
-        bw = max(max(sx, dx) - bx, 1)
-        bh = max(abs(dy - sy), 1)
-    elif is_back and not vertical:
-        detour = 70 * EMU_PER_PX  # extend upward past the top channel
-        bx = min(sx, dx)
-        by = min(sy, dy) - detour
-        bw = max(abs(dx - sx), 1)
-        bh = max(max(sy, dy) - by, 1)
-    else:
-        bx = min(sx, dx)
-        by = min(sy, dy)
-        bw = max(abs(dx - sx), 1)
-        bh = max(abs(dy - sy), 1)
-
-    flip_h = sx > dx
-    flip_v = sy > dy
-    return bx, by, bw, bh, flip_h, flip_v
-
-
 def _node_shape_xml(
     shape_id: int, node: Node,
     x_emu: int, y_emu: int, w_emu: int, h_emu: int,
-    layout: _Layout,
+    grid: _Grid,
 ) -> str:
     preset = NODE_PRESET.get(node.type, "flowChartProcess")
     fill = NODE_FILL.get(node.type, "FFFFFF")
     text = xml_escape(node.label)
     name = xml_escape(f"{node.id}_{node.label}")
-    anchor = _two_cell_anchor(x_emu, y_emu, w_emu, h_emu, layout)
+    anchor = _two_cell_anchor(x_emu, y_emu, w_emu, h_emu, grid)
     return (
         '<xdr:twoCellAnchor editAs="oneCell">'
         f'{anchor}'
@@ -741,16 +537,8 @@ def _bent_connector_xml(
     dst_shape_id: int, dst_site: int,
     bx: int, by: int, bw: int, bh: int,
     flip_h: bool, flip_v: bool,
-    layout: _Layout,
+    grid: _Grid,
 ) -> str:
-    """Emit a ``bentConnector3`` wired to two shapes' connection points.
-
-    Excel uses ``stCxn``/``endCxn`` to stick the endpoints to the referenced
-    shapes, so moving a shape re-routes the connector automatically. The
-    ``xfrm`` acts as a routing hint — for back-edges we expand it outward
-    (see ``_connector_bbox``) to coax Excel into drawing a U instead of a
-    straight line.
-    """
     flips = []
     if flip_h:
         flips.append('flipH="1"')
@@ -758,7 +546,7 @@ def _bent_connector_xml(
         flips.append('flipV="1"')
     flip_attr = (" " + " ".join(flips)) if flips else ""
 
-    anchor = _two_cell_anchor(bx, by, bw, bh, layout)
+    anchor = _two_cell_anchor(bx, by, bw, bh, grid)
 
     return (
         '<xdr:twoCellAnchor editAs="oneCell">'
@@ -785,10 +573,10 @@ def _bent_connector_xml(
 def _label_xml(
     shape_id: int,
     x_emu: int, y_emu: int, w_emu: int, h_emu: int,
-    text: str, layout: _Layout,
+    text: str, grid: _Grid,
 ) -> str:
     t = xml_escape(text)
-    anchor = _two_cell_anchor(x_emu, y_emu, w_emu, h_emu, layout)
+    anchor = _two_cell_anchor(x_emu, y_emu, w_emu, h_emu, grid)
     return (
         '<xdr:twoCellAnchor editAs="oneCell">'
         f'{anchor}'
