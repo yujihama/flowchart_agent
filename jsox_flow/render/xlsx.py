@@ -514,18 +514,19 @@ def _build_drawing_xml(
         dst_pt = _site_point(dst_cx, dst_cy, w_emu, h_emu, dst_site)
 
         if e.is_back:
-            # bentConnector3 is H-V-H; our back edges are V-H-V (up
-            # through the back channel, across, back down into dst).
-            # Emit three straight segments explicitly so every renderer
-            # gets the same U-shape.
+            # bentConnector3 is H-V-H; our back edges are V-H-V.
+            # Use a single cxnSp with a custGeom path that describes the
+            # U-shape and bind BOTH endpoints to the source/target shapes
+            # via stCxn/endCxn, so the connector follows node drags as a
+            # single logical unit.
             channel = grid.back_channel_center_emu()
-            for seg_start, seg_end, has_arrow in _back_edge_segments(
-                src_pt, dst_pt, channel, grid.vertical,
-            ):
-                parts.append(_straight_connector_xml(
-                    next_id, seg_start, seg_end, has_arrow, grid,
-                ))
-                next_id += 1
+            parts.append(_back_edge_custgeom_xml(
+                next_id,
+                node_shape_id[e.from_id], src_site,
+                node_shape_id[e.to_id],   dst_site,
+                src_pt, dst_pt, channel, grid,
+            ))
+            next_id += 1
         else:
             bx = min(src_pt[0], dst_pt[0])
             by = min(src_pt[1], dst_pt[1])
@@ -556,79 +557,89 @@ def _build_drawing_xml(
     return "\n".join(parts)
 
 
-def _back_edge_segments(
-    src_pt: Tuple[int, int],
-    dst_pt: Tuple[int, int],
-    channel: int,
-    vertical: bool,
-) -> List[Tuple[Tuple[int, int], Tuple[int, int], bool]]:
-    """Three straight segments forming a U-route through the back channel.
+def _back_edge_custgeom_xml(
+    conn_id: int,
+    src_shape_id: int, src_site: int,
+    dst_shape_id: int, dst_site: int,
+    src_pt: Tuple[int, int], dst_pt: Tuple[int, int],
+    channel: int, grid: _Grid,
+) -> str:
+    """Single connector with a custGeom U-path, bound to src/dst shapes.
 
-    Returns (start, end, has_arrow) tuples. Only the final segment carries
-    the arrow head.
+    The path lives in the connector's local coordinate space (0..100000)
+    so it scales with the xfrm bbox. ``stCxn``/``endCxn`` make Excel
+    follow node drags: when a node moves, the xfrm bbox is recomputed
+    and the U-path scales to match.
     """
     sx, sy = src_pt
     dx, dy = dst_pt
-    if vertical:
-        # back exits LEFT, U routes through the left channel (col A)
-        p0 = (sx, sy)                 # exit src
-        p1 = (channel, sy)            # into left channel
-        p2 = (channel, dy)            # up/down to dst row
-        p3 = (dx, dy)                 # back into dst LEFT
+
+    if grid.vertical:
+        # U through the left back-channel (col A).
+        # Path: src.LEFT -> LEFT across to channel -> UP/DOWN -> RIGHT into dst.LEFT
+        bx = min(sx, dx, channel)
+        by = min(sy, dy)
+        bw = max(max(sx, dx) - bx, 1)
+        bh = max(abs(dy - sy), 1)
+        path_pts = [
+            ("M", sx, sy),   # src.LEFT
+            ("L", channel, sy),
+            ("L", channel, dy),
+            ("L", dx, dy),   # dst.LEFT
+        ]
     else:
-        # back exits TOP, U routes through the top channel (row 3)
-        p0 = (sx, sy)                 # exit src
-        p1 = (sx, channel)            # into top channel
-        p2 = (dx, channel)            # across to dst column
-        p3 = (dx, dy)                 # back into dst TOP
-    return [(p0, p1, False), (p1, p2, False), (p2, p3, True)]
+        # U through the top back-channel (row 3).
+        # Path: src.TOP -> UP to channel -> across -> DOWN into dst.TOP
+        bx = min(sx, dx)
+        by = min(sy, dy, channel)
+        bw = max(abs(dx - sx), 1)
+        bh = max(max(sy, dy) - by, 1)
+        path_pts = [
+            ("M", sx, sy),   # src.TOP
+            ("L", sx, channel),
+            ("L", dx, channel),
+            ("L", dx, dy),   # dst.TOP
+        ]
 
+    # Remap to normalised 0..100000 local coordinates.
+    def norm(x: int, y: int) -> Tuple[int, int]:
+        nx = 0 if bw == 0 else int((x - bx) * 100000 / bw)
+        ny = 0 if bh == 0 else int((y - by) * 100000 / bh)
+        return nx, ny
 
-def _straight_connector_xml(
-    conn_id: int,
-    start: Tuple[int, int],
-    end: Tuple[int, int],
-    has_arrow: bool,
-    grid: _Grid,
-) -> str:
-    """Emit a ``straightConnector1`` for a single orthogonal segment."""
-    sx, sy = start
-    ex, ey = end
-    bx = min(sx, ex)
-    by = min(sy, ey)
-    dx_abs = abs(ex - sx)
-    dy_abs = abs(ey - sy)
-    if dy_abs == 0:
-        bw = max(dx_abs, 1)
-        bh = 0
-    elif dx_abs == 0:
-        bw = 0
-        bh = max(dy_abs, 1)
-    else:
-        bw = dx_abs
-        bh = dy_abs
+    path_xml_parts: List[str] = []
+    for cmd, px, py in path_pts:
+        nx, ny = norm(px, py)
+        if cmd == "M":
+            path_xml_parts.append(f'<a:moveTo><a:pt x="{nx}" y="{ny}"/></a:moveTo>')
+        else:
+            path_xml_parts.append(f'<a:lnTo><a:pt x="{nx}" y="{ny}"/></a:lnTo>')
+    path_body = "".join(path_xml_parts)
 
-    flips = []
-    if has_arrow:
-        if sx > ex:
-            flips.append('flipH="1"')
-        if sy > ey:
-            flips.append('flipV="1"')
-    flip_attr = (" " + " ".join(flips)) if flips else ""
-
-    arrow = '<a:tailEnd type="triangle"/>' if has_arrow else ""
     anchor = _two_cell_anchor(bx, by, bw, bh, grid)
     return (
         '<xdr:twoCellAnchor editAs="oneCell">'
         f'{anchor}'
         '<xdr:cxnSp macro="">'
         f'<xdr:nvCxnSpPr><xdr:cNvPr id="{conn_id}" name="Back_{conn_id}"/>'
-        '<xdr:cNvCxnSpPr/></xdr:nvCxnSpPr>'
+        '<xdr:cNvCxnSpPr>'
+        f'<a:stCxn id="{src_shape_id}" idx="{src_site}"/>'
+        f'<a:endCxn id="{dst_shape_id}" idx="{dst_site}"/>'
+        '</xdr:cNvCxnSpPr>'
+        '</xdr:nvCxnSpPr>'
         '<xdr:spPr>'
-        f'<a:xfrm{flip_attr}><a:off x="{bx}" y="{by}"/><a:ext cx="{bw}" cy="{bh}"/></a:xfrm>'
-        '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>'
+        f'<a:xfrm><a:off x="{bx}" y="{by}"/><a:ext cx="{bw}" cy="{bh}"/></a:xfrm>'
+        '<a:custGeom>'
+        '<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>'
+        '<a:rect l="0" t="0" r="100000" b="100000"/>'
+        '<a:pathLst>'
+        '<a:path w="100000" h="100000">'
+        f'{path_body}'
+        '</a:path>'
+        '</a:pathLst>'
+        '</a:custGeom>'
         f'<a:ln w="12700"><a:solidFill><a:srgbClr val="{EDGE_COLOR}"/></a:solidFill>'
-        f'{arrow}</a:ln>'
+        '<a:tailEnd type="triangle"/></a:ln>'
         '</xdr:spPr>'
         '</xdr:cxnSp>'
         '<xdr:clientData/>'
