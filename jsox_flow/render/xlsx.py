@@ -510,38 +510,36 @@ def _build_drawing_xml(
         h_emu = src_nl.height * EMU_PER_PX
 
         src_site, dst_site = _pick_connector_sites(grid.vertical, e.is_back)
+        src_pt = _site_point(src_cx, src_cy, w_emu, h_emu, src_site)
+        dst_pt = _site_point(dst_cx, dst_cy, w_emu, h_emu, dst_site)
 
-        # Bounding box is a routing hint. For back edges, extend it
-        # toward the back-channel axis so bentConnector3 has perpendicular
-        # room to draw the U-detour rather than collapsing to a straight
-        # overlay.
-        if e.is_back and grid.vertical:
+        if e.is_back:
+            # bentConnector3 is H-V-H; our back edges are V-H-V (up
+            # through the back channel, across, back down into dst).
+            # Emit three straight segments explicitly so every renderer
+            # gets the same U-shape.
             channel = grid.back_channel_center_emu()
-            bx = min(src_cx, dst_cx, channel) - w_emu // 2
-            by = min(src_cy, dst_cy) - h_emu // 2
-            bw = max(max(src_cx, dst_cx) - bx, 1)
-            bh = max(abs(dst_cy - src_cy), 1)
-        elif e.is_back:
-            channel = grid.back_channel_center_emu()
-            bx = min(src_cx, dst_cx) - w_emu // 2
-            by = min(src_cy, dst_cy, channel) - h_emu // 2
-            bw = max(abs(dst_cx - src_cx), 1)
-            bh = max(max(src_cy, dst_cy) - by, 1)
+            for seg_start, seg_end, has_arrow in _back_edge_segments(
+                src_pt, dst_pt, channel, grid.vertical,
+            ):
+                parts.append(_straight_connector_xml(
+                    next_id, seg_start, seg_end, has_arrow, grid,
+                ))
+                next_id += 1
         else:
-            bx = min(src_cx, dst_cx) - w_emu // 2
-            by = min(src_cy, dst_cy) - h_emu // 2
-            bw = max(abs(dst_cx - src_cx), 1)
-            bh = max(abs(dst_cy - src_cy), 1)
-        flip_h = src_cx > dst_cx
-        flip_v = src_cy > dst_cy
-
-        parts.append(_bent_connector_xml(
-            next_id,
-            node_shape_id[e.from_id], src_site,
-            node_shape_id[e.to_id],   dst_site,
-            bx, by, bw, bh, flip_h, flip_v, grid,
-        ))
-        next_id += 1
+            bx = min(src_pt[0], dst_pt[0])
+            by = min(src_pt[1], dst_pt[1])
+            bw = max(abs(dst_pt[0] - src_pt[0]), 1)
+            bh = max(abs(dst_pt[1] - src_pt[1]), 1)
+            flip_h = src_pt[0] > dst_pt[0]
+            flip_v = src_pt[1] > dst_pt[1]
+            parts.append(_bent_connector_xml(
+                next_id,
+                node_shape_id[e.from_id], src_site,
+                node_shape_id[e.to_id],   dst_site,
+                bx, by, bw, bh, flip_h, flip_v, grid,
+            ))
+            next_id += 1
 
         if e.condition:
             lx, ly = _label_anchor_emu(
@@ -556,6 +554,101 @@ def _build_drawing_xml(
 
     parts.append("</xdr:wsDr>")
     return "\n".join(parts)
+
+
+def _back_edge_segments(
+    src_pt: Tuple[int, int],
+    dst_pt: Tuple[int, int],
+    channel: int,
+    vertical: bool,
+) -> List[Tuple[Tuple[int, int], Tuple[int, int], bool]]:
+    """Three straight segments forming a U-route through the back channel.
+
+    Returns (start, end, has_arrow) tuples. Only the final segment carries
+    the arrow head.
+    """
+    sx, sy = src_pt
+    dx, dy = dst_pt
+    if vertical:
+        # back exits LEFT, U routes through the left channel (col A)
+        p0 = (sx, sy)                 # exit src
+        p1 = (channel, sy)            # into left channel
+        p2 = (channel, dy)            # up/down to dst row
+        p3 = (dx, dy)                 # back into dst LEFT
+    else:
+        # back exits TOP, U routes through the top channel (row 3)
+        p0 = (sx, sy)                 # exit src
+        p1 = (sx, channel)            # into top channel
+        p2 = (dx, channel)            # across to dst column
+        p3 = (dx, dy)                 # back into dst TOP
+    return [(p0, p1, False), (p1, p2, False), (p2, p3, True)]
+
+
+def _straight_connector_xml(
+    conn_id: int,
+    start: Tuple[int, int],
+    end: Tuple[int, int],
+    has_arrow: bool,
+    grid: _Grid,
+) -> str:
+    """Emit a ``straightConnector1`` for a single orthogonal segment."""
+    sx, sy = start
+    ex, ey = end
+    bx = min(sx, ex)
+    by = min(sy, ey)
+    dx_abs = abs(ex - sx)
+    dy_abs = abs(ey - sy)
+    if dy_abs == 0:
+        bw = max(dx_abs, 1)
+        bh = 0
+    elif dx_abs == 0:
+        bw = 0
+        bh = max(dy_abs, 1)
+    else:
+        bw = dx_abs
+        bh = dy_abs
+
+    flips = []
+    if has_arrow:
+        if sx > ex:
+            flips.append('flipH="1"')
+        if sy > ey:
+            flips.append('flipV="1"')
+    flip_attr = (" " + " ".join(flips)) if flips else ""
+
+    arrow = '<a:tailEnd type="triangle"/>' if has_arrow else ""
+    anchor = _two_cell_anchor(bx, by, bw, bh, grid)
+    return (
+        '<xdr:twoCellAnchor editAs="oneCell">'
+        f'{anchor}'
+        '<xdr:cxnSp macro="">'
+        f'<xdr:nvCxnSpPr><xdr:cNvPr id="{conn_id}" name="Back_{conn_id}"/>'
+        '<xdr:cNvCxnSpPr/></xdr:nvCxnSpPr>'
+        '<xdr:spPr>'
+        f'<a:xfrm{flip_attr}><a:off x="{bx}" y="{by}"/><a:ext cx="{bw}" cy="{bh}"/></a:xfrm>'
+        '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>'
+        f'<a:ln w="12700"><a:solidFill><a:srgbClr val="{EDGE_COLOR}"/></a:solidFill>'
+        f'{arrow}</a:ln>'
+        '</xdr:spPr>'
+        '</xdr:cxnSp>'
+        '<xdr:clientData/>'
+        '</xdr:twoCellAnchor>'
+    )
+
+
+def _site_point(
+    cx: int, cy: int, w_emu: int, h_emu: int, site: int,
+) -> Tuple[int, int]:
+    """Return the absolute EMU coordinate of a shape's connection site."""
+    half_w = w_emu // 2
+    half_h = h_emu // 2
+    if site == SITE_TOP:
+        return (cx, cy - half_h)
+    if site == SITE_BOTTOM:
+        return (cx, cy + half_h)
+    if site == SITE_RIGHT:
+        return (cx + half_w, cy)
+    return (cx - half_w, cy)  # SITE_LEFT
 
 
 def _pick_connector_sites(vertical: bool, is_back: bool) -> Tuple[int, int]:
