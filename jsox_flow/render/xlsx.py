@@ -14,9 +14,9 @@ All rank / collision / back-edge classification lives in
 :mod:`jsox_flow.layout`. This module consumes a :class:`LayoutResult` and
 translates its px coordinates into Excel's EMU / cell-anchor space.
 
-Back-edge routing is delegated to Excel itself: connectors are wired via
-``stCxn``/``endCxn`` to ``bentConnector3`` shapes and Excel auto-routes.
-No custom "top channel" logic here.
+Edges are emitted as explicit orthogonal paths. That keeps the PDF/PNG
+rendering stable across Excel and LibreOffice, and avoids connector
+auto-routing that can make back edges appear to attach to the wrong node.
 
 Implementation
 --------------
@@ -109,6 +109,8 @@ LABEL_COLOR = "C0392B"
 
 LABEL_W_PX = 50
 LABEL_H_PX = 18
+CONNECTOR_PAD_PX = 6
+LOCAL_BACK_CHANNEL_GAP_PX = 18
 
 
 # --- connection-point indices ----------------------------------------------
@@ -486,18 +488,11 @@ def _build_drawing_xml(
         ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
     ]
 
-    for nid, nl in layout.nodes.items():
-        node = node_by_id[nid]
-        w_emu = nl.width * EMU_PER_PX
-        h_emu = nl.height * EMU_PER_PX
-        x_emu = ox + nl.x * EMU_PER_PX - w_emu // 2
-        y_emu = oy + nl.y * EMU_PER_PX - h_emu // 2
-        parts.append(_node_shape_xml(
-            node_shape_id[nid], node, x_emu, y_emu, w_emu, h_emu, grid,
-        ))
-
     label_w_emu = LABEL_W_PX * EMU_PER_PX
     label_h_emu = LABEL_H_PX * EMU_PER_PX
+
+    edge_parts: List[str] = []
+    label_parts: List[str] = []
 
     for e in layout.edges:
         src_nl = layout.nodes[e.from_id]
@@ -509,38 +504,26 @@ def _build_drawing_xml(
         w_emu = src_nl.width * EMU_PER_PX
         h_emu = src_nl.height * EMU_PER_PX
 
-        src_site, dst_site = _pick_connector_sites(grid.vertical, e.is_back)
+        same_lane_back = e.is_back and src_nl.lane_id == dst_nl.lane_id
+        if e.is_back:
+            src_site, dst_site = _pick_back_connector_sites(
+                grid.vertical, same_lane_back, src_nl, dst_nl,
+            )
+        else:
+            src_site, dst_site = _pick_forward_connector_sites(grid.vertical)
         src_pt = _site_point(src_cx, src_cy, w_emu, h_emu, src_site)
         dst_pt = _site_point(dst_cx, dst_cy, w_emu, h_emu, dst_site)
 
         if e.is_back:
-            # bentConnector3 is H-V-H; our back edges are V-H-V.
-            # Use a single cxnSp with a custGeom path that describes the
-            # U-shape and bind BOTH endpoints to the source/target shapes
-            # via stCxn/endCxn, so the connector follows node drags as a
-            # single logical unit.
-            channel = grid.back_channel_center_emu()
-            parts.append(_back_edge_custgeom_xml(
-                next_id,
-                node_shape_id[e.from_id], src_site,
-                node_shape_id[e.to_id],   dst_site,
-                src_pt, dst_pt, channel, grid,
-            ))
-            next_id += 1
+            channel = _back_edge_channel_emu(
+                src_nl, dst_nl, src_pt, dst_pt, grid,
+            )
+            path_pts = _back_edge_points(src_pt, dst_pt, channel, grid.vertical)
         else:
-            bx = min(src_pt[0], dst_pt[0])
-            by = min(src_pt[1], dst_pt[1])
-            bw = max(abs(dst_pt[0] - src_pt[0]), 1)
-            bh = max(abs(dst_pt[1] - src_pt[1]), 1)
-            flip_h = src_pt[0] > dst_pt[0]
-            flip_v = src_pt[1] > dst_pt[1]
-            parts.append(_bent_connector_xml(
-                next_id,
-                node_shape_id[e.from_id], src_site,
-                node_shape_id[e.to_id],   dst_site,
-                bx, by, bw, bh, flip_h, flip_v, grid,
-            ))
-            next_id += 1
+            path_pts = _forward_edge_points(src_pt, dst_pt, grid.vertical)
+
+        edge_parts.append(_connector_path_xml(next_id, path_pts, grid))
+        next_id += 1
 
         if e.condition:
             lx, ly = _label_anchor_emu(
@@ -548,58 +531,112 @@ def _build_drawing_xml(
                 label_w_emu, label_h_emu,
                 is_back=e.is_back, vertical=grid.vertical,
             )
-            parts.append(_label_xml(
+            label_parts.append(_label_xml(
                 next_id, lx, ly, label_w_emu, label_h_emu, e.condition, grid,
             ))
             next_id += 1
 
+    # Draw edges first so node fills cover connector stubs and crossings.
+    parts.extend(edge_parts)
+
+    for nid, nl in layout.nodes.items():
+        node = node_by_id[nid]
+        w_emu = nl.width * EMU_PER_PX
+        h_emu = nl.height * EMU_PER_PX
+        x_emu = ox + nl.x * EMU_PER_PX - w_emu // 2
+        y_emu = oy + nl.y * EMU_PER_PX - h_emu // 2
+        parts.append(_node_shape_xml(
+            node_shape_id[nid], node, x_emu, y_emu, w_emu, h_emu, grid,
+        ))
+
+    parts.extend(label_parts)
     parts.append("</xdr:wsDr>")
     return "\n".join(parts)
 
 
-def _back_edge_custgeom_xml(
-    conn_id: int,
-    src_shape_id: int, src_site: int,
-    dst_shape_id: int, dst_site: int,
+def _back_edge_channel_emu(
+    src_nl, dst_nl,
     src_pt: Tuple[int, int], dst_pt: Tuple[int, int],
-    channel: int, grid: _Grid,
-) -> str:
-    """Single connector with a custGeom U-path, bound to src/dst shapes.
+    grid: _Grid,
+) -> int:
+    """Choose the detour line for a back edge.
 
-    The path lives in the connector's local coordinate space (0..100000)
-    so it scales with the xfrm bbox. ``stCxn``/``endCxn`` make Excel
-    follow node drags: when a node moves, the xfrm bbox is recomputed
-    and the U-path scales to match.
+    Same-lane returns are local: sending them through the global back
+    channel makes a short "send back" action jump to the top of the
+    sheet, which is visually noisy. Cross-lane returns use the corridor
+    between the source and target lanes.
     """
+    gap = LOCAL_BACK_CHANNEL_GAP_PX * EMU_PER_PX
+    if grid.vertical:
+        if src_nl.lane_id != dst_nl.lane_id:
+            left = min(src_pt[0], dst_pt[0])
+            right = max(src_pt[0], dst_pt[0])
+            return (left + right) // 2
+        return max(src_pt[0], dst_pt[0]) + gap
+
+    if src_nl.lane_id != dst_nl.lane_id:
+        top = min(src_pt[1], dst_pt[1])
+        bottom = max(src_pt[1], dst_pt[1])
+        return (top + bottom) // 2
+
+    return max(src_pt[1], dst_pt[1]) + gap
+
+
+def _back_edge_points(
+    src_pt: Tuple[int, int], dst_pt: Tuple[int, int], channel: int, vertical: bool,
+) -> List[Tuple[int, int]]:
     sx, sy = src_pt
     dx, dy = dst_pt
 
-    if grid.vertical:
-        # U through the left back-channel (col A).
-        # Path: src.LEFT -> LEFT across to channel -> UP/DOWN -> RIGHT into dst.LEFT
-        bx = min(sx, dx, channel)
-        by = min(sy, dy)
-        bw = max(max(sx, dx) - bx, 1)
-        bh = max(abs(dy - sy), 1)
-        path_pts = [
-            ("M", sx, sy),   # src.LEFT
-            ("L", channel, sy),
-            ("L", channel, dy),
-            ("L", dx, dy),   # dst.LEFT
+    if vertical:
+        return [
+            (sx, sy),
+            (channel, sy),
+            (channel, dy),
+            (dx, dy),
         ]
-    else:
-        # U through the top back-channel (row 3).
-        # Path: src.TOP -> UP to channel -> across -> DOWN into dst.TOP
-        bx = min(sx, dx)
-        by = min(sy, dy, channel)
-        bw = max(abs(dx - sx), 1)
-        bh = max(max(sy, dy) - by, 1)
-        path_pts = [
-            ("M", sx, sy),   # src.TOP
-            ("L", sx, channel),
-            ("L", dx, channel),
-            ("L", dx, dy),   # dst.TOP
-        ]
+    return [
+        (sx, sy),
+        (sx, channel),
+        (dx, channel),
+        (dx, dy),
+    ]
+
+
+def _forward_edge_points(
+    src_pt: Tuple[int, int], dst_pt: Tuple[int, int], vertical: bool,
+) -> List[Tuple[int, int]]:
+    sx, sy = src_pt
+    dx, dy = dst_pt
+
+    if vertical:
+        if abs(dx - sx) < 2:
+            return [(sx, sy), (dx, dy)]
+        mid_y = (sy + dy) // 2
+        return [(sx, sy), (sx, mid_y), (dx, mid_y), (dx, dy)]
+
+    if abs(dy - sy) < 2:
+        return [(sx, sy), (dx, dy)]
+    mid_x = (sx + dx) // 2
+    return [(sx, sy), (mid_x, sy), (mid_x, dy), (dx, dy)]
+
+
+def _connector_path_xml(
+    conn_id: int, points: List[Tuple[int, int]], grid: _Grid,
+) -> str:
+    """Render an explicit connector path.
+
+    We intentionally avoid ``stCxn``/``endCxn`` here. LibreOffice can
+    reinterpret bound connectors during PDF export, especially custom
+    U-shaped back edges; fixed paths match the generated image reliably.
+    """
+    pad = CONNECTOR_PAD_PX * EMU_PER_PX
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    bx = max(min(xs) - pad, 0)
+    by = max(min(ys) - pad, 0)
+    bw = max(max(xs) + pad - bx, 1)
+    bh = max(max(ys) + pad - by, 1)
 
     # Remap to normalised 0..100000 local coordinates.
     def norm(x: int, y: int) -> Tuple[int, int]:
@@ -608,9 +645,9 @@ def _back_edge_custgeom_xml(
         return nx, ny
 
     path_xml_parts: List[str] = []
-    for cmd, px, py in path_pts:
+    for i, (px, py) in enumerate(points):
         nx, ny = norm(px, py)
-        if cmd == "M":
+        if i == 0:
             path_xml_parts.append(f'<a:moveTo><a:pt x="{nx}" y="{ny}"/></a:moveTo>')
         else:
             path_xml_parts.append(f'<a:lnTo><a:pt x="{nx}" y="{ny}"/></a:lnTo>')
@@ -620,13 +657,10 @@ def _back_edge_custgeom_xml(
     return (
         '<xdr:twoCellAnchor editAs="oneCell">'
         f'{anchor}'
-        '<xdr:cxnSp macro="">'
-        f'<xdr:nvCxnSpPr><xdr:cNvPr id="{conn_id}" name="Back_{conn_id}"/>'
-        '<xdr:cNvCxnSpPr>'
-        f'<a:stCxn id="{src_shape_id}" idx="{src_site}"/>'
-        f'<a:endCxn id="{dst_shape_id}" idx="{dst_site}"/>'
-        '</xdr:cNvCxnSpPr>'
-        '</xdr:nvCxnSpPr>'
+        '<xdr:sp macro="" textlink="">'
+        f'<xdr:nvSpPr><xdr:cNvPr id="{conn_id}" name="Edge_{conn_id}"/>'
+        '<xdr:cNvSpPr/>'
+        '</xdr:nvSpPr>'
         '<xdr:spPr>'
         f'<a:xfrm><a:off x="{bx}" y="{by}"/><a:ext cx="{bw}" cy="{bh}"/></a:xfrm>'
         '<a:custGeom>'
@@ -641,7 +675,7 @@ def _back_edge_custgeom_xml(
         f'<a:ln w="12700"><a:solidFill><a:srgbClr val="{EDGE_COLOR}"/></a:solidFill>'
         '<a:tailEnd type="triangle"/></a:ln>'
         '</xdr:spPr>'
-        '</xdr:cxnSp>'
+        '</xdr:sp>'
         '<xdr:clientData/>'
         '</xdr:twoCellAnchor>'
     )
@@ -662,20 +696,34 @@ def _site_point(
     return (cx - half_w, cy)  # SITE_LEFT
 
 
-def _pick_connector_sites(vertical: bool, is_back: bool) -> Tuple[int, int]:
-    """Pick which shape edges the connector attaches to.
+def _pick_forward_connector_sites(vertical: bool) -> Tuple[int, int]:
+    """Pick facing connector sites for normal forward edges."""
+    if vertical:
+        return SITE_BOTTOM, SITE_TOP
+    return SITE_RIGHT, SITE_LEFT
 
-    For forward edges the endpoints are on the facing sides (so the
-    connector becomes an L); for back edges we use same-side endpoints
-    so Excel naturally draws a U-shape that detours around the source.
+
+def _pick_back_connector_sites(
+    vertical: bool, same_lane_back: bool, src_nl, dst_nl,
+) -> Tuple[int, int]:
+    """Pick connector sites for returns.
+
+    Same-lane returns leave from the outer side of the source so their
+    origin is obvious. Cross-lane returns enter the target from the side
+    facing the source instead of jumping through the global back channel.
     """
     if vertical:
-        if is_back:
-            return SITE_LEFT, SITE_LEFT
-        return SITE_BOTTOM, SITE_TOP
-    if is_back:
-        return SITE_TOP, SITE_TOP
-    return SITE_RIGHT, SITE_LEFT
+        if same_lane_back:
+            return SITE_TOP, SITE_RIGHT
+        if src_nl.x > dst_nl.x:
+            return SITE_LEFT, SITE_RIGHT
+        return SITE_RIGHT, SITE_LEFT
+
+    if same_lane_back:
+        return SITE_RIGHT, SITE_BOTTOM
+    if src_nl.y > dst_nl.y:
+        return SITE_TOP, SITE_BOTTOM
+    return SITE_BOTTOM, SITE_TOP
 
 
 def _label_anchor_emu(
@@ -709,8 +757,9 @@ def _label_anchor_emu(
             cx = src_cx - half_w - gap - lw
             cy = src_cy
         else:
-            # 25% along the path in x, a bit below src
-            cx = src_cx + (dst_cx - src_cx) // 4
+            # Place closer to the destination than the source so labels
+            # for stacked sibling targets separate visibly.
+            cx = src_cx + (dst_cx - src_cx) * 3 // 4
             cy = src_cy + half_h + gap + lh
     else:
         if is_back:
@@ -718,9 +767,9 @@ def _label_anchor_emu(
             cy = src_cy - half_h - gap - lh
         else:
             cx = src_cx + half_w + gap + lw
-            # 25% along the path in y; places sibling labels apart when
-            # their destinations are in different lanes.
-            cy = src_cy + (dst_cy - src_cy) // 4
+            # Place closer to the destination than the source so labels
+            # for stacked sibling targets separate visibly.
+            cy = src_cy + (dst_cy - src_cy) * 3 // 4
     return cx - lw, cy - lh
 
 

@@ -179,10 +179,11 @@ def _find_tool(env_var: str, names: List[str]) -> str:
 def _convert_to_pdf(xlsx: Path, out_dir: Path, *, timeout: int) -> Path:
     soffice = _find_tool("JSOX_SOFFICE", ["soffice", "libreoffice"])
     with tempfile.TemporaryDirectory(prefix="jsox-lo-") as profile:
+        profile_uri = Path(profile).resolve().as_uri()
         cmd = [
             soffice,
             "--headless", "--norestore", "--nologo", "--nofirststartwizard",
-            f"-env:UserInstallation=file://{profile}",
+            f"-env:UserInstallation={profile_uri}",
             "--convert-to", "pdf",
             "--outdir", str(out_dir),
             str(xlsx),
