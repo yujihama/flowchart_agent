@@ -1,0 +1,11 @@
+{
+  "name": "jsox-flow-layout",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dagre-based layout engine for JSOX flowchart renderer",
+  "main": "dagre_layout.js",
+  "license": "MIT",
+  "dependencies": {
+    "dagre": "^0.8.5"
+  }
+}

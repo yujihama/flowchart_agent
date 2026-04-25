@@ -1,34 +1,20 @@
-"""SVG renderer with real horizontal swimlanes.
+"""SVG renderer.
 
-Layout algorithm
-----------------
-1. Assign each node to a column via longest-path from `start` (back edges
-   — edges that would create a cycle — are ignored for column assignment).
-2. Assign each node to a row = index of its lane in `flow.lanes`.
-3. Place node centers at
-       x = LANE_HEADER_W + col * COL_W + COL_W / 2
-       y = MARGIN       + row * LANE_H + LANE_H / 2
-4. Edge routing:
-       * forward (col grows):   L-shape through vertical midline
-       * backward (col shrinks): route over the top margin band
+Consumes a :class:`LayoutResult` from :mod:`jsox_flow.layout`, so the
+rendering pipeline is purely presentational: no rank-assignment logic
+lives here.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from .._layout import assign_columns as _assign_columns
-from .._layout import back_edges as _back_edges
-from .._layout import resolve_cell_collisions as _resolve_cell_collisions
+from ..layout import LayoutOptions, LayoutResult, compute_layout
 from ..model import Edge, Flow, Node
 
 # --- geometry ---------------------------------------------------------------
 
 MARGIN = 30
-LANE_HEADER_W = 120
-COL_W = 190
-LANE_H = 110
-NODE_W = 140
-NODE_H = 52
+LANE_HEADER_W_PX = 120
 
 LANE_FILL_EVEN = "#f7f9fc"
 LANE_FILL_ODD = "#eef2f8"
@@ -51,22 +37,24 @@ COND_COLOR = "#c0392b"
 
 # --- public API -------------------------------------------------------------
 
-def to_svg(flow: Flow) -> str:
-    cols = _assign_columns(flow)
-    cols = _resolve_cell_collisions(flow, cols)
-    max_col = max(cols.values()) if cols else 0
-    lane_row = {lane.id: i for i, lane in enumerate(flow.lanes)}
+def to_svg(flow: Flow, *, layout: Optional[LayoutResult] = None) -> str:
+    """Render ``flow`` as SVG.
 
-    width = LANE_HEADER_W + (max_col + 1) * COL_W + MARGIN
-    height = MARGIN * 2 + len(flow.lanes) * LANE_H
+    Pass a pre-computed ``layout`` to reuse the same positions the XLSX
+    renderer saw; otherwise a default horizontal layout is computed.
+    """
+    if layout is None:
+        layout = compute_layout(flow, LayoutOptions(orientation="horizontal"))
+    if layout.orientation != "horizontal":
+        raise ValueError("SVG renderer currently only supports horizontal layouts.")
 
-    positions: Dict[str, Tuple[float, float]] = {}
-    for n in flow.nodes:
-        cx = LANE_HEADER_W + cols[n.id] * COL_W + COL_W / 2
-        cy = MARGIN + lane_row[n.lane_id] * LANE_H + LANE_H / 2
-        positions[n.id] = (cx, cy)
+    node_by_id = {n.id: n for n in flow.nodes}
+    lane_by_id = {l.id: l for l in flow.lanes}
 
-    back_edges = _back_edges(flow, cols)
+    lane_h = layout.canvas_height // max(len(layout.lane_order), 1)
+    body_w = layout.canvas_width
+    width = LANE_HEADER_W_PX + body_w + MARGIN
+    height = MARGIN * 2 + layout.canvas_height
 
     parts: List[str] = []
     parts.append(
@@ -75,19 +63,18 @@ def to_svg(flow: Flow) -> str:
         f'font-family="-apple-system, Segoe UI, Meiryo, sans-serif" font-size="13">'
     )
     parts.append(_defs())
+    parts.extend(_render_lanes(layout, lane_by_id, lane_h, width))
 
-    # swimlanes (drawn first so edges/nodes sit on top)
-    parts.extend(_render_lanes(flow, width))
+    # shift nodes by LANE_HEADER_W + MARGIN (body origin), lane header bar on left
+    ox = LANE_HEADER_W_PX
+    oy = MARGIN
 
-    # edges (behind nodes)
-    for e in flow.edges:
-        parts.extend(
-            _render_edge(e, positions, cols, is_back=(e.from_id, e.to_id) in back_edges)
-        )
+    for e in layout.edges:
+        parts.extend(_render_edge(e, layout, node_by_id, ox, oy))
 
-    # nodes
-    for n in flow.nodes:
-        parts.extend(_render_node(n, positions[n.id]))
+    for nid, nl in layout.nodes.items():
+        parts.extend(_render_node(node_by_id[nid], nl.x + ox, nl.y + oy,
+                                  nl.width, nl.height))
 
     parts.append("</svg>")
     return "\n".join(parts)
@@ -106,115 +93,122 @@ def _defs() -> str:
     )
 
 
-def _render_lanes(flow: Flow, width: float) -> List[str]:
+def _render_lanes(
+    layout: LayoutResult, lane_by_id: Dict[str, object],
+    lane_h: int, width: int,
+) -> List[str]:
     out: List[str] = []
-    for i, lane in enumerate(flow.lanes):
-        y = MARGIN + i * LANE_H
+    for i, lane_id in enumerate(layout.lane_order):
+        lane = lane_by_id[lane_id]
+        y = MARGIN + i * lane_h
         fill = LANE_FILL_EVEN if i % 2 == 0 else LANE_FILL_ODD
         out.append(
-            f'<rect x="0" y="{y}" width="{width}" height="{LANE_H}" '
+            f'<rect x="0" y="{y}" width="{width}" height="{lane_h}" '
             f'fill="{fill}" stroke="{LANE_STROKE}"/>'
         )
         out.append(
-            f'<rect x="0" y="{y}" width="{LANE_HEADER_W}" height="{LANE_H}" '
+            f'<rect x="0" y="{y}" width="{LANE_HEADER_W_PX}" height="{lane_h}" '
             f'fill="{LANE_HEADER_FILL}" stroke="{LANE_STROKE}"/>'
         )
         out.append(
-            f'<text x="{LANE_HEADER_W / 2}" y="{y + LANE_H / 2}" '
+            f'<text x="{LANE_HEADER_W_PX / 2}" y="{y + lane_h / 2}" '
             f'text-anchor="middle" dominant-baseline="middle" '
             f'font-weight="bold">{_escape(lane.name)}</text>'
         )
     return out
 
 
-def _render_node(node: Node, pos: Tuple[float, float]) -> List[str]:
-    cx, cy = pos
-    x = cx - NODE_W / 2
-    y = cy - NODE_H / 2
+def _render_node(
+    node: Node, cx: float, cy: float, w: int, h: int,
+) -> List[str]:
+    x = cx - w / 2
+    y = cy - h / 2
     fill = NODE_FILLS.get(node.type, NODE_FILLS["task"])
     label = _escape(node.label)
     out: List[str] = []
 
     if node.type in ("start", "end"):
-        rx = NODE_H / 2
+        rx = h / 2
         out.append(
-            f'<rect x="{x}" y="{y}" width="{NODE_W}" height="{NODE_H}" '
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
             f'rx="{rx}" ry="{rx}" fill="{fill}" stroke="{NODE_STROKE}"/>'
         )
     elif node.type == "decision":
-        # diamond fits within the same NODE_W x NODE_H bbox as other shapes
-        # so every edge uses the same attachment geometry
         pts = (
-            f"{cx},{cy - NODE_H / 2} "
-            f"{cx + NODE_W / 2},{cy} "
-            f"{cx},{cy + NODE_H / 2} "
-            f"{cx - NODE_W / 2},{cy}"
+            f"{cx},{cy - h / 2} "
+            f"{cx + w / 2},{cy} "
+            f"{cx},{cy + h / 2} "
+            f"{cx - w / 2},{cy}"
         )
         out.append(
             f'<polygon points="{pts}" fill="{fill}" stroke="{NODE_STROKE}"/>'
         )
     elif node.type == "subprocess":
         out.append(
-            f'<rect x="{x}" y="{y}" width="{NODE_W}" height="{NODE_H}" '
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
             f'fill="{fill}" stroke="{NODE_STROKE}"/>'
         )
         out.append(
-            f'<line x1="{x + 8}" y1="{y}" x2="{x + 8}" y2="{y + NODE_H}" '
+            f'<line x1="{x + 8}" y1="{y}" x2="{x + 8}" y2="{y + h}" '
             f'stroke="{NODE_STROKE}"/>'
         )
         out.append(
-            f'<line x1="{x + NODE_W - 8}" y1="{y}" x2="{x + NODE_W - 8}" '
-            f'y2="{y + NODE_H}" stroke="{NODE_STROKE}"/>'
+            f'<line x1="{x + w - 8}" y1="{y}" x2="{x + w - 8}" '
+            f'y2="{y + h}" stroke="{NODE_STROKE}"/>'
         )
     elif node.type == "document":
         path = (
-            f"M{x},{y} L{x + NODE_W},{y} L{x + NODE_W},{y + NODE_H - 8} "
-            f"Q{x + NODE_W * 0.75},{y + NODE_H + 4} "
-            f"{x + NODE_W / 2},{y + NODE_H - 8} "
-            f"Q{x + NODE_W * 0.25},{y + NODE_H - 20} {x},{y + NODE_H - 8} Z"
+            f"M{x},{y} L{x + w},{y} L{x + w},{y + h - 8} "
+            f"Q{x + w * 0.75},{y + h + 4} "
+            f"{x + w / 2},{y + h - 8} "
+            f"Q{x + w * 0.25},{y + h - 20} {x},{y + h - 8} Z"
         )
         out.append(f'<path d="{path}" fill="{fill}" stroke="{NODE_STROKE}"/>')
-    else:  # task
+    else:
         out.append(
-            f'<rect x="{x}" y="{y}" width="{NODE_W}" height="{NODE_H}" '
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
             f'fill="{fill}" stroke="{NODE_STROKE}"/>'
         )
 
     out.append(
         f'<text x="{cx}" y="{cy}" text-anchor="middle" '
-        f'dominant-baseline="middle">{label}</text>'
+        f'dominant-baseline="middle">{_escape(node.label)}</text>'
     )
     return out
 
 
 def _render_edge(
-    edge: Edge,
-    positions: Dict[str, Tuple[float, float]],
-    cols: Dict[str, int],
-    *,
-    is_back: bool,
+    edge, layout: LayoutResult, node_by_id: Dict[str, Node],
+    ox: int, oy: int,
 ) -> List[str]:
-    src_x, src_y = positions[edge.from_id]
-    dst_x, dst_y = positions[edge.to_id]
+    src_nl = layout.nodes[edge.from_id]
+    dst_nl = layout.nodes[edge.to_id]
+    sx, sy = src_nl.x + ox, src_nl.y + oy
+    dx, dy = dst_nl.x + ox, dst_nl.y + oy
+    hw_s = src_nl.width // 2
+    hh_s = src_nl.height // 2
+    hw_d = dst_nl.width // 2
+    hh_d = dst_nl.height // 2
+
     out: List[str] = []
 
-    if not is_back:
-        sx = src_x + NODE_W / 2
-        sy = src_y
-        dx = dst_x - NODE_W / 2
-        dy = dst_y
-        mid_x = (sx + dx) / 2
-        path = f"M{sx},{sy} L{mid_x},{sy} L{mid_x},{dy} L{dx},{dy}"
-        label_x, label_y = sx + 8, sy - 6
+    if not edge.is_back:
+        ssx = sx + hw_s
+        ssy = sy
+        ddx = dx - hw_d
+        ddy = dy
+        mid_x = (ssx + ddx) / 2
+        path = f"M{ssx},{ssy} L{mid_x},{ssy} L{mid_x},{ddy} L{ddx},{ddy}"
+        label_x, label_y = ssx + 8, ssy - 6
     else:
-        # exit top of src, route over the top margin, enter top of dst
-        sx = src_x
-        sy = src_y - NODE_H / 2
-        dx = dst_x
-        dy = dst_y - NODE_H / 2
+        # route over the top margin band, exit top of src, enter top of dst
+        ssx = sx
+        ssy = sy - hh_s
+        ddx = dx
+        ddy = dy - hh_d
         top_y = MARGIN / 2 - 8
-        path = f"M{sx},{sy} L{sx},{top_y} L{dx},{top_y} L{dx},{dy}"
-        label_x, label_y = sx - 18, sy - 6
+        path = f"M{ssx},{ssy} L{ssx},{top_y} L{ddx},{top_y} L{ddx},{ddy}"
+        label_x, label_y = ssx - 18, ssy - 6
 
     out.append(
         f'<path d="{path}" fill="none" stroke="{EDGE_STROKE}" '
